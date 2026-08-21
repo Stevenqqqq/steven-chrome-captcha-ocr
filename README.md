@@ -1,17 +1,29 @@
 # Steven 的 Chrome 驗證碼 OCR 助手
 
-> Beta：目前適合人工在場、按一次快捷鍵辨識並填入的輔助流程。它不是自動搶票或自動送出工具，也不保證每一種驗證碼都能正確辨識。
+> Beta：適合人工在場時，按一次快捷鍵辨識並填入。它不會自動送出，也不保證適用所有驗證碼。
 
-這是一個獨立的 Windows／Chrome 本機 OCR 專案，不會修改其他搶票或駕照系統。Chrome 擴充功能只在開啟工具列按鈕或使用快捷鍵時取得目前分頁的暫時權限；圖片只送到本機 `127.0.0.1:8765`。
+這是一個 Windows／Chrome 本機 OCR 工具。擴充功能只在使用按鈕或快捷鍵時取得目前分頁的暫時權限，圖片僅在本機處理。
 
-## 目前驗證狀態
+## 目前狀態
+
+目前仍為 Beta：核心功能已通過本機與 GitHub 自動測試，但跨網站準確率尚未達專案的正式版門檻。實際表現會依網站的字型、背景與干擾方式而不同。
+
+<details>
+<summary>查看驗證數據與發布門檻</summary>
 
 - ToolWeb 四字母固定測試：exact `50/55 = 90.91%`、character `97.73%`、no-answer `0%`。
-- 外部 CC0 四字英數 final（非 ToolWeb release evidence）：exact `568/689 = 82.44%`、character `93.72%`。
+- 外部 CC0 四字英數 final：exact `568/689 = 82.44%`、character `93.72%`。
 - 同一外部 final 的純數字子集：exact `184/193 = 95.34%`、character `98.58%`。
-- 專案自訂的 v1 發布門檻尚未通過，因此目前版本應標示為 beta，不能宣稱已達 production-ready 準確率。
 
-外部數據只用來檢查一般英數能力；不同網站的字型、背景、扭曲與干擾線差異很大，不能把外部成績當成指定網站保證。
+外部數據只用來檢查一般英數能力，不能當成指定網站的效果保證。正式版門檻如下：
+
+- ToolWeb 四字母：test exact accuracy 至少 `95%`、character accuracy 至少 `98.5%`、no-answer 不超過 `1%`。
+- 英數混合：test exact accuracy 至少 `92%`、character accuracy 至少 `98%`、no-answer 不超過 `2%`。
+- 英數 test 至少 `200` 張；每個數字 `0–9` 與主要易混淆字元至少出現 `20` 次。
+
+詳細的評估、資料切分與 release gate 工具請見 [training/README.md](training/README.md)。
+
+</details>
 
 ## 系統需求
 
@@ -40,7 +52,10 @@ GitHub 發布版預設使用 `ddddocr` 套件內建的 `official` 模型，因�
 2. 開啟含有可見驗證碼與輸入框的網站。
 3. 按 `Ctrl+Shift+Y` 即可辨識並填入；成功後彈窗會自動關閉，可直接按 `Enter` 送出。進入下一題後再按一次會自動偵測新圖片。若 OCR 字元數與網頁要求不同，擴充功能會拒絕自動填入並保留該題供人工回報。
 
-## 回報辨識錯題
+<details>
+<summary>進階：錯題回報與模型資料</summary>
+
+### 回報辨識錯題
 
 每次辨識後，擴充功能會保留該題的短期回報代碼：
 
@@ -56,7 +71,7 @@ GitHub 發布版預設使用 `ddddocr` 套件內建的 `official` 模型，因�
 py -3.10 ocr_server.py --feedback-report --report-output "$env:TEMP\steven_ocr_feedback_report.json"
 ```
 
-## 主動學習資料
+### 主動學習資料
 
 本機 API v6 支援將 ToolWeb 練習頁「已被網站判定正確」的答案存為 `site_accepted` 樣本，並在辨識回應加入 `active_learning` 分歧評分。網站未確認、答錯或來源不明的資料不會寫入。完整操作與採樣規則請見 `training/ACTIVE_LEARNING.md`。
 
@@ -76,37 +91,16 @@ py -3.10 ocr_server.py --dataset-manifest --manifest-seed 20260811 --manifest-sp
 
 資料集達 200 張後，可使用 `training/trial_pipeline.py` 匯出 train split 與建立現行模型基準。完整命令與候選模型 gate 請見 `training/README.md`；validation/test 不會交給 trainer，候選也不會自動覆蓋正式模型。
 
-## GitHub 發布準確率門檻
-
-發布前使用 label-grouped manifest，避免相同完整答案跨越 train 與 validation/test。正式 gate：
-
-- ToolWeb 四字母：test exact accuracy 至少 `95%`、character accuracy 至少 `98.5%`、no-answer 不超過 `1%`。
-- 英數混合：test exact accuracy 至少 `92%`、character accuracy 至少 `98%`、no-answer 不超過 `2%`。
-- 英數 test 至少 `200` 張；每個數字 `0–9` 與 `O/0、I/1、Z/2、S/5、G/6、B/8` 每個符號至少出現 `20` 次。
-
-產生 release readiness 報告：
-
-```powershell
-py -3.10 training\release_gate.py --manifest <你的固定manifest.json> --baseline <你的baseline.json> --policy <你的policy.json> --output "$env:TEMP\steven_ocr_release_readiness.json"
-```
-
-若數字覆蓋不足，英數模式會標示未驗證；不會用純字母成績冒充英數準確率。
-
-### Synthetic 英數開發基準
-
-可先在一個空的外部目錄產生 200 張 deterministic 英數圖片，用來發現 `O/0、I/1、Z/2、S/5、G/6、B/8` 混淆：
-
-```powershell
-py -3.10 training\alphanumeric_benchmark.py --output-dir "$env:TEMP\steven_ocr_alphanumeric_dev"
-```
-
-這個工具只是 synthetic development benchmark；圖片不得複製到 `training/samples`，成績不會計入 release gate，也不能代替目標網站的真實英數 test set。
+</details>
 
 若快捷鍵與其他擴充功能衝突，可在 `chrome://extensions/shortcuts` 自訂按鍵。
 
 可先用 `測試頁面.html` 驗證操作。Chrome 內建頁面、Chrome 線上應用程式商店及部分跨網域 iframe 不允許擴充功能注入，這些頁面不適用。
 
-## OCR 邏輯
+<details>
+<summary>技術細節：OCR 邏輯</summary>
+
+### OCR 邏輯
 
 - `official`：ddddocr 內建模型。
 - `universal`：通用自訂 ONNX 模型。
@@ -118,6 +112,8 @@ py -3.10 training\alphanumeric_benchmark.py --output-dir "$env:TEMP\steven_ocr_a
 - 單一 preferred 預處理版本通常保有優先權；只有其他答案至少取得 4 票且領先至少 4 票時，才以強共識覆寫，避免一張 noisy preferred 圖壓過多個一致變體。
 
 OCR 圖片只傳到本機 `http://127.0.0.1:8765`，服務不接受一般網站跨來源呼叫。
+
+</details>
 
 ## 安全、隱私與使用界線
 

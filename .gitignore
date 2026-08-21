@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+env/
+*.log
+*.zip
+build/
+dist/
+*.egg-info/
+.DS_Store
+Thumbs.db
+
+# Custom model files are local-only unless their source and redistribution
+# license are documented separately.
+models/*/custom.onnx
+models/*/charsets.json
+
+training/samples/*
+!training/samples/.gitkeep
+training/feedback/*
+!training/feedback/.gitkeep
+tests/results/*
+!tests/results/.gitkeep

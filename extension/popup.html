@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>驗證碼 OCR</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">STEVEN OCR</p>
+          <h1>驗證碼辨識</h1>
+        </div>
+        <span id="serviceState" class="service-state" aria-label="OCR 服務狀態"></span>
+      </header>
+
+      <section class="result-panel" aria-live="polite">
+        <p id="statusText">正在檢查 OCR 服務...</p>
+        <strong id="answerText" hidden></strong>
+        <small id="detailText"></small>
+      </section>
+
+      <button id="recognizeButton" type="button" disabled>
+        <span class="scan-icon" aria-hidden="true"></span>
+        <span>辨識並填入</span>
+      </button>
+
+      <section id="feedbackPanel" class="feedback-panel" hidden>
+        <p>若辨識錯誤或答案長度不符，輸入你人工確認的正確答案：</p>
+        <p class="previous-answer">OCR 答案：<strong id="feedbackPrediction"></strong></p>
+        <label for="correctAnswerInput">正確答案</label>
+        <input
+          id="correctAnswerInput"
+          type="text"
+          minlength="3"
+          maxlength="6"
+          inputmode="text"
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+          placeholder="例如 10662"
+        >
+        <div class="feedback-actions">
+          <button id="reportButton" type="button">保存錯題</button>
+          <button id="nextButton" class="secondary" type="button">答案正確／下一題</button>
+        </div>
+      </section>
+    </main>
+    <script src="captcha_image.js"></script>
+    <script src="feedback_helpers.js"></script>
+    <script src="popup_startup.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

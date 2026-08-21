@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Steven 驗證碼 OCR 助手",
+  "version": "1.8.0",
+  "description": "按一下即可辨識目前頁面的驗證碼並填入鄰近欄位。",
+  "minimum_chrome_version": "127",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8765/*"
+  ],
+  "action": {
+    "default_title": "驗證碼 OCR",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "recognize-current-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y"
+      },
+      "description": "辨識並填入目前頁面的驗證碼"
+    }
+  }
+}

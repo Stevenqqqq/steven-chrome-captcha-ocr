@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>驗證碼 OCR 測試</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        background: #0d1113;
+        color: #eef3f4;
+        font-family: "Microsoft JhengHei UI", "Segoe UI", sans-serif;
+      }
+      main { width: min(460px, calc(100vw - 32px)); }
+      h1 { margin: 0 0 20px; font-size: 24px; letter-spacing: 0; }
+      .field { display: grid; grid-template-columns: 96px 1fr; gap: 12px; align-items: center; }
+      label { color: #aeb9bd; }
+      input {
+        width: 100%; height: 42px; border: 1px solid #465259; border-radius: 4px;
+        background: #151a1d; color: #fff; padding: 0 10px; font: 20px Consolas, monospace;
+      }
+      .captcha-row { margin-top: 14px; display: flex; gap: 12px; align-items: center; }
+      #captchaCanvas { width: 170px; height: 54px; background: #fff; border-radius: 3px; }
+      button {
+        height: 38px; border: 1px solid #4bcfc4; border-radius: 4px;
+        background: #087f7e; color: #fff; padding: 0 14px; cursor: pointer;
+      }
+      #expected { margin: 16px 0 0 108px; color: #77868c; font: 13px Consolas, monospace; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>驗證碼 OCR 測試</h1>
+      <div class="field">
+        <label for="verifyCode">驗證碼</label>
+        <input id="verifyCode" name="captcha" maxlength="4" autocomplete="off">
+      </div>
+      <div class="captcha-row">
+        <span style="width:84px"></span>
+        <canvas id="captchaCanvas" class="captcha-image" width="340" height="108" aria-label="驗證碼圖片"></canvas>
+        <button id="refresh" type="button">換一張</button>
+      </div>
+      <p id="expected"></p>
+    </main>
+    <script>
+      const canvas = document.querySelector("#captchaCanvas");
+      const context = canvas.getContext("2d");
+      const expected = document.querySelector("#expected");
+      const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+      function createCaptcha() {
+        const answer = Array.from({ length: 4 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+        context.fillStyle = "#f7faf9";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        for (let i = 0; i < 7; i += 1) {
+          context.strokeStyle = `hsla(${Math.random() * 360}, 35%, 40%, .45)`;
+          context.beginPath();
+          context.moveTo(Math.random() * canvas.width, Math.random() * canvas.height);
+          context.lineTo(Math.random() * canvas.width, Math.random() * canvas.height);
+          context.stroke();
+        }
+        context.font = "bold 66px Consolas";
+        context.fillStyle = "#172226";
+        context.setTransform(1, 0, -0.08, 1, 0, 0);
+        context.fillText(answer, 55, 80);
+        context.resetTransform();
+        expected.textContent = `測試答案：${answer}`;
+        document.querySelector("#verifyCode").value = "";
+      }
+
+      document.querySelector("#refresh").addEventListener("click", createCaptcha);
+      createCaptcha();
+    </script>
+  </body>
+</html>

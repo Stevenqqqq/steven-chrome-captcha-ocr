@@ -6,6 +6,7 @@ import urllib.request
 from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -198,6 +199,27 @@ class ApiTests(unittest.TestCase):
 class ServerLifecycleTests(unittest.TestCase):
     def test_prevents_two_ocr_versions_from_sharing_the_same_port(self):
         self.assertFalse(ocr_server.OcrHttpServer.allow_reuse_address)
+
+    def test_running_service_probe_requires_matching_api_version(self):
+        class Response:
+            status = 200
+
+            def __init__(self, version):
+                self.version = version
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, _limit):
+                return json.dumps({"ok": True, "version": self.version}).encode("utf-8")
+
+        with patch("ocr_server.urllib.request.urlopen", return_value=Response(ocr_server.API_VERSION)):
+            self.assertTrue(ocr_server.matching_service_is_running())
+        with patch("ocr_server.urllib.request.urlopen", return_value=Response(ocr_server.API_VERSION - 1)):
+            self.assertFalse(ocr_server.matching_service_is_running())
 
 
 if __name__ == "__main__":

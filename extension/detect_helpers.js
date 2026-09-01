@@ -62,5 +62,30 @@
     }
   }
 
-  return { imageIdentity, originalImageDataUrl };
+  function finiteCandidateValue(candidate, key, fallback) {
+    const value = Number(candidate?.[key]);
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  function compareCandidates(first, second) {
+    const firstScore = finiteCandidateValue(first, "score", Number.NEGATIVE_INFINITY);
+    const secondScore = finiteCandidateValue(second, "score", Number.NEGATIVE_INFINITY);
+    if (firstScore !== secondScore) return secondScore > firstScore ? 1 : -1;
+
+    const firstInputScore = finiteCandidateValue(first, "inputScore", Number.NEGATIVE_INFINITY);
+    const secondInputScore = finiteCandidateValue(second, "inputScore", Number.NEGATIVE_INFINITY);
+    if (firstInputScore !== secondInputScore) return secondInputScore > firstInputScore ? 1 : -1;
+
+    const firstInputDistance = finiteCandidateValue(first, "inputDistance", Number.POSITIVE_INFINITY);
+    const secondInputDistance = finiteCandidateValue(second, "inputDistance", Number.POSITIVE_INFINITY);
+    if (firstInputDistance !== secondInputDistance) return firstInputDistance > secondInputDistance ? 1 : -1;
+
+    return 0;
+  }
+
+  function rankCandidates(candidates) {
+    return [...candidates].sort(compareCandidates);
+  }
+
+  return { imageIdentity, originalImageDataUrl, compareCandidates, rankCandidates };
 }));

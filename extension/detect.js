@@ -78,11 +78,17 @@
       .map((input) => ({ input, score: inputScore(input, image) }))
       .sort((a, b) => b.score - a.score);
     if (rankedInputs[0]) score += Math.min(35, rankedInputs[0].score / 2);
-    return { image, input: rankedInputs[0]?.input, score, inputScore: rankedInputs[0]?.score || 0 };
+    return {
+      image,
+      input: rankedInputs[0]?.input,
+      score,
+      inputScore: rankedInputs[0]?.score || 0,
+      inputDistance: rankedInputs[0] ? distance(rankedInputs[0].input, image) : Infinity,
+    };
   }).filter((item) => item.input);
 
-  candidates.sort((a, b) => b.score - a.score);
-  const best = candidates[0];
+  const rankedCandidates = CaptchaDetect.rankCandidates(candidates);
+  const best = rankedCandidates[0];
   if (!best || best.score < 22 || best.inputScore < 8) {
     return { ok: false, error: "找不到可見的驗證碼圖片與輸入框" };
   }

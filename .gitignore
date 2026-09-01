@@ -16,6 +16,7 @@ Thumbs.db
 # license are documented separately.
 models/*/custom.onnx
 models/*/charsets.json
+models/fusion_v7/*
 
 training/samples/*
 !training/samples/.gitkeep

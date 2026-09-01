@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Steven 驗證碼 OCR 助手",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "按一下即可辨識目前頁面的驗證碼並填入鄰近欄位。",
   "minimum_chrome_version": "127",
   "permissions": [

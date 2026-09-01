@@ -41,6 +41,53 @@ class OcrEngineLoadingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ocr_server.OcrError, "OCR 模型不完整"):
                     ocr_server.OcrEngine(model_root).load()
 
+    def test_rejects_a_partially_installed_fusion_model(self):
+        with TemporaryDirectory() as directory:
+            model_root = Path(directory)
+            folder = model_root / "fusion_v7"
+            folder.mkdir()
+            (folder / "config.json").write_text("{}", encoding="utf-8")
+            fake_module = SimpleNamespace(DdddOcr=self.FakeDdddOcr)
+
+            with patch.dict(sys.modules, {"ddddocr": fake_module}):
+                with self.assertRaisesRegex(ocr_server.OcrError, "融合 OCR 模型載入失敗"):
+                    ocr_server.OcrEngine(model_root).load()
+
+
+class OcrEngineFusionStrategyTests(unittest.TestCase):
+    class FakeSolver:
+        def classification(self, image_bytes, probability=False):
+            if probability:
+                return {
+                    "text": "WXYZ",
+                    "probabilities": [],
+                    "charset": [""],
+                }
+            return "WXYZ"
+
+    class FakeFusion:
+        def recognize(self, image_bytes, baseline, probability_variants):
+            return {
+                "answer": "ABCD",
+                "selection_strategy": "light_generic_v1",
+                "fusion_model": "light_generic_v1",
+            }
+
+    def test_records_light_fusion_selection_strategy(self):
+        engine = ocr_server.OcrEngine(Path("unused"))
+        engine.solvers = [("official", self.FakeSolver())]
+        engine.fusion = self.FakeFusion()
+
+        with patch.object(
+            ocr_server,
+            "image_variants",
+            return_value=[("raw", b"variant")],
+        ):
+            result = engine.recognize(b"image", expected_length=4)
+
+        self.assertEqual(result["answer"], "ABCD")
+        self.assertEqual(result["selection_strategy"], "light_generic_v1")
+
 
 class NormalizeAnswerTests(unittest.TestCase):
     def test_normalizes_to_uppercase_ascii_letters_and_digits(self):

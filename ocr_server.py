@@ -8,6 +8,8 @@ import re
 import secrets
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import Counter, OrderedDict, defaultdict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -927,6 +929,7 @@ class OcrEngine:
     def __init__(self, model_root: Path = MODEL_ROOT):
         self.model_root = Path(model_root)
         self.solvers = []
+        self.fusion = None
         self.lock = threading.Lock()
 
     def load(self):
@@ -957,6 +960,14 @@ class OcrEngine:
                 )
             )
         self.solvers = solvers
+        fusion_folder = self.model_root / "fusion_v7"
+        if fusion_folder.exists():
+            try:
+                from fusion_ocr import Fixed4FusionOcr
+
+                self.fusion = Fixed4FusionOcr(fusion_folder)
+            except Exception as error:
+                raise OcrError(f"融合 OCR 模型載入失敗: {error}") from error
         return self
 
     @property
@@ -967,12 +978,18 @@ class OcrEngine:
         variants = list(image_variants(image_bytes))
         predictions = []
         failures = []
+        probability_variants = []
         with self.lock:
             self.load()
             for solver_name, solver in self.solvers:
                 for variant_name, variant_bytes in variants:
                     try:
-                        answer = normalize_answer(solver.classification(variant_bytes))
+                        if solver_name == "official" and self.fusion is not None and expected_length == 4:
+                            probability = solver.classification(variant_bytes, probability=True)
+                            probability_variants.append((variant_name, probability))
+                            answer = normalize_answer(probability.get("text"))
+                        else:
+                            answer = normalize_answer(solver.classification(variant_bytes))
                     except Exception as error:
                         failures.append(f"{solver_name}/{variant_name}: {error}")
                         continue
@@ -987,6 +1004,20 @@ class OcrEngine:
                         predictions.append(prediction)
 
         result = choose_ensemble(predictions, expected_length=expected_length)
+        if self.fusion is not None and expected_length == 4:
+            try:
+                fused = self.fusion.recognize(
+                    image_bytes, normalize_answer(result.get("answer")), probability_variants
+                )
+                if fused is not None:
+                    result.update(fused)
+                    result["selection_strategy"] = str(
+                        fused.get("selection_strategy")
+                        or fused.get("fusion_model")
+                        or "fusion_v4_v6_v7"
+                    )
+            except Exception as error:
+                failures.append(f"fusion_v4_v6_v7: {error}")
         result["predictions"] = predictions
         result["active_learning"] = apply_active_learning_sampling(
             assess_active_learning_priority(result),
@@ -1166,9 +1197,30 @@ class OcrHttpServer(ThreadingHTTPServer):
     allow_reuse_address = False
 
 
+def matching_service_is_running(host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=1.0) -> bool:
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    try:
+        with urllib.request.urlopen(
+            f"http://{probe_host}:{port}/health",
+            timeout=timeout,
+        ) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read(MAX_FEEDBACK_BYTES).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, urllib.error.URLError):
+        return False
+    return payload.get("ok") is True and payload.get("version") == API_VERSION
+
+
 def run_server(host=DEFAULT_HOST, port=DEFAULT_PORT):
     ENGINE.load()
-    server = OcrHttpServer((host, port), OcrRequestHandler)
+    try:
+        server = OcrHttpServer((host, port), OcrRequestHandler)
+    except OSError:
+        if matching_service_is_running(host, port):
+            print(f"OCR 服務已在執行：http://{host}:{port}")
+            return False
+        raise
     print(f"Steven 驗證碼 OCR 服務已啟動：http://{host}:{port}")
     print("已載入模型：" + ", ".join(ENGINE.names))
     print("關閉此視窗或按 Ctrl+C 可停止服務。")
@@ -1178,6 +1230,7 @@ def run_server(host=DEFAULT_HOST, port=DEFAULT_PORT):
         pass
     finally:
         server.server_close()
+    return True
 
 
 def main():
@@ -1186,6 +1239,7 @@ def main():
     parser.add_argument("--port", type=int, default=int(os.environ.get("OCR_PORT", DEFAULT_PORT)))
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true")
+    mode.add_argument("--check-running", action="store_true")
     mode.add_argument("--feedback-report", action="store_true")
     mode.add_argument("--dataset-manifest", action="store_true")
     parser.add_argument("--report-output", type=Path)
@@ -1220,6 +1274,8 @@ def main():
         ENGINE.load()
         print("OCR service check ok: " + ", ".join(ENGINE.names))
         return 0
+    if args.check_running:
+        return 0 if matching_service_is_running(args.host, args.port) else 1
     run_server(args.host, args.port)
     return 0
 

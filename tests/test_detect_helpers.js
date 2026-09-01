@@ -1,7 +1,43 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { imageIdentity, originalImageDataUrl } = require("../extension/detect_helpers.js");
+const {
+  compareCandidates,
+  imageIdentity,
+  originalImageDataUrl,
+  rankCandidates,
+} = require("../extension/detect_helpers.js");
+
+
+test("uses input association to break equal image-score ties", () => {
+  const logo = { id: "logo", score: 87, inputScore: 79.06, inputDistance: 90 };
+  const captcha = { id: "captcha", score: 87, inputScore: 106.9, inputDistance: 30 };
+
+  const candidates = [logo, captcha];
+  const ranked = rankCandidates(candidates);
+
+  assert.deepEqual(ranked.map((candidate) => candidate.id), ["captcha", "logo"]);
+  assert.deepEqual(candidates.map((candidate) => candidate.id), ["logo", "captcha"]);
+});
+
+
+test("keeps the higher total score ahead of input tie-breakers", () => {
+  const ranked = rankCandidates([
+    { id: "strong-input", score: 86, inputScore: 130 },
+    { id: "strong-image", score: 87, inputScore: 8 },
+  ]);
+
+  assert.deepEqual(ranked.map((candidate) => candidate.id), ["strong-image", "strong-input"]);
+});
+
+
+test("uses proximity only when image and input scores are equal", () => {
+  const farther = { id: "farther", score: 87, inputScore: 100, inputDistance: 60 };
+  const nearer = { id: "nearer", score: 87, inputScore: 100, inputDistance: 20 };
+
+  assert.equal(compareCandidates(nearer, farther), -1);
+  assert.deepEqual(rankCandidates([farther, nearer]).map((candidate) => candidate.id), ["nearer", "farther"]);
+});
 
 
 test("image identity changes when the CAPTCHA image URL changes", () => {

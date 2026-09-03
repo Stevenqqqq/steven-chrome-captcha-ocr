@@ -163,7 +163,7 @@ test("manifest grants storage for feedback that survives popup closure", () => {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 
   assert.ok(manifest.permissions.includes("storage"));
-  assert.equal(manifest.version, "1.8.1");
+  assert.equal(manifest.version, "1.8.2");
 });
 
 

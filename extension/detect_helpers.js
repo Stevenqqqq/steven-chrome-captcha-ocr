@@ -6,6 +6,8 @@
   const MAX_IMAGE_PIXELS = 2_000_000;
   const MAX_DATA_URL_LENGTH = 7_000_000;
   const SAFE_DATA_IMAGE_PATTERN = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]*={0,2}$/i;
+  const CAPTCHA_HINT_PATTERN = /captcha|verify|verification|vcode|auth.?code|check.?code|security.?code|驗證碼|验证码|圖形碼|校驗碼/i;
+  const NON_CAPTCHA_INPUT_PATTERN = /user|username|account|login|employee|student|email|phone|mobile|password|帳號|帐号|學號|学号|工號|工号|密碼|密码|電子郵件|手機/i;
 
   function safeDataImage(dataUrl) {
     return typeof dataUrl === "string"
@@ -67,6 +69,55 @@
     return Number.isFinite(value) ? value : fallback;
   }
 
+  function rectCenter(rect) {
+    return {
+      x: Number(rect?.left || 0) + Number(rect?.width || 0) / 2,
+      y: Number(rect?.top || 0) + Number(rect?.height || 0) / 2,
+    };
+  }
+
+  function scoreInputAssociation(candidate) {
+    const metadata = String(candidate?.metadata || "");
+    const labelText = String(candidate?.labelText || "");
+    const localContext = String(candidate?.localContext || "");
+    const semanticText = `${metadata} ${labelText}`;
+    let score = 0;
+
+    if (CAPTCHA_HINT_PATTERN.test(metadata)) score += 55;
+    if (CAPTCHA_HINT_PATTERN.test(labelText)) score += 70;
+    if (CAPTCHA_HINT_PATTERN.test(localContext)) score += 30;
+    if (NON_CAPTCHA_INPUT_PATTERN.test(semanticText)) score -= 90;
+    if (candidate?.hasValue) score -= 35;
+
+    const maxLength = Number(candidate?.maxLength || 0);
+    if (maxLength >= 3 && maxLength <= 8) score += 20;
+
+    const imageRect = candidate?.imageRect || {};
+    const inputRect = candidate?.inputRect || {};
+    const imageCenter = rectCenter(imageRect);
+    const inputCenter = rectCenter(inputRect);
+    const horizontal = imageCenter.x - inputCenter.x;
+    const vertical = Math.abs(imageCenter.y - inputCenter.y);
+    const distance = Math.hypot(horizontal, vertical);
+    score += Math.max(0, 30 - distance / 12);
+
+    const rowTolerance = Math.max(
+      24,
+      Math.min(Number(imageRect.height || 0), Number(inputRect.height || 0)) * 1.25,
+    );
+    const sameRow = vertical <= rowTolerance;
+    if (sameRow) {
+      score += 60;
+      const gap = Number(imageRect.left || 0)
+        - (Number(inputRect.left || 0) + Number(inputRect.width || 0));
+      if (gap >= -24 && gap <= 180) score += 35;
+      if (horizontal >= -20) score += 10;
+    } else {
+      score -= Math.min(45, vertical / 5);
+    }
+    return score;
+  }
+
   function compareCandidates(first, second) {
     const firstScore = finiteCandidateValue(first, "score", Number.NEGATIVE_INFINITY);
     const secondScore = finiteCandidateValue(second, "score", Number.NEGATIVE_INFINITY);
@@ -87,5 +138,11 @@
     return [...candidates].sort(compareCandidates);
   }
 
-  return { imageIdentity, originalImageDataUrl, compareCandidates, rankCandidates };
+  return {
+    imageIdentity,
+    originalImageDataUrl,
+    compareCandidates,
+    rankCandidates,
+    scoreInputAssociation,
+  };
 }));

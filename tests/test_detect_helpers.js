@@ -6,6 +6,7 @@ const {
   imageIdentity,
   originalImageDataUrl,
   rankCandidates,
+  scoreInputAssociation,
 } = require("../extension/detect_helpers.js");
 
 
@@ -37,6 +38,51 @@ test("uses proximity only when image and input scores are equal", () => {
 
   assert.equal(compareCandidates(nearer, farther), -1);
   assert.deepEqual(rankCandidates([farther, nearer]).map((candidate) => candidate.id), ["nearer", "farther"]);
+});
+
+
+test("selects the same-row CAPTCHA field instead of the populated account field", () => {
+  const imageRect = { left: 260, top: 205, width: 90, height: 40 };
+  const accountScore = scoreInputAssociation({
+    metadata: "userid account student number",
+    labelText: "帳號 Employee number or Student number",
+    localContext: "",
+    maxLength: 0,
+    hasValue: true,
+    imageRect,
+    inputRect: { left: 22, top: 42, width: 513, height: 37 },
+  });
+  const captchaScore = scoreInputAssociation({
+    metadata: "4碼英數字",
+    labelText: "驗證碼 Captcha",
+    localContext: "驗證碼 Captcha 4碼英數字",
+    maxLength: 4,
+    hasValue: false,
+    imageRect,
+    inputRect: { left: 25, top: 205, width: 235, height: 40 },
+  });
+
+  assert.ok(captchaScore > accountScore + 150);
+});
+
+
+test("same-row empty field wins even when the CAPTCHA label is not associated", () => {
+  const imageRect = { left: 260, top: 205, width: 90, height: 40 };
+  const accountScore = scoreInputAssociation({
+    metadata: "login username",
+    hasValue: true,
+    imageRect,
+    inputRect: { left: 22, top: 42, width: 513, height: 37 },
+  });
+  const genericSameRowScore = scoreInputAssociation({
+    metadata: "4碼英數字",
+    maxLength: 4,
+    hasValue: false,
+    imageRect,
+    inputRect: { left: 25, top: 205, width: 235, height: 40 },
+  });
+
+  assert.ok(genericSameRowScore > accountScore);
 });
 
 

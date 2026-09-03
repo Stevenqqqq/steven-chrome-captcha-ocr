@@ -39,20 +39,36 @@
     return Math.hypot(ax - bx, ay - by);
   };
 
+  const associatedLabelText = (input) => {
+    const fragments = Array.from(input.labels || []).map((label) => label.textContent || "");
+    const wrappingLabel = input.closest("label");
+    if (wrappingLabel) fragments.push(wrappingLabel.textContent || "");
+    const labelledBy = (input.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
+    labelledBy.forEach((id) => fragments.push(document.getElementById(id)?.textContent || ""));
+    return fragments.join(" ");
+  };
+
+  const localInputContext = (input) => {
+    const container = input.closest(
+      "tr, td, .form-group, .field, .input-group, .form-row, .control-group, .form-item",
+    );
+    if (container) return container.textContent || "";
+    const parent = input.parentElement;
+    if (!parent || ["FORM", "BODY", "HTML"].includes(parent.tagName)) return "";
+    const text = parent.textContent || "";
+    return text.length <= 300 ? text : "";
+  };
+
   const inputScore = (input, image) => {
-    let score = 0;
-    const metadata = textOf(input);
-    if (hintPattern.test(metadata)) score += 45;
-    const maxLength = Number(input.maxLength || 0);
-    if (maxLength >= 3 && maxLength <= 8) score += 12;
-    const context = input.closest("tr, .form-group, .field, .input-group, form")?.textContent || "";
-    if (hintPattern.test(context)) score += 28;
-    const pixels = distance(input, image);
-    score += Math.max(0, 35 - pixels / 10);
-    const imageRect = image.getBoundingClientRect();
-    const inputRect = input.getBoundingClientRect();
-    if (Math.abs((imageRect.top + imageRect.height / 2) - (inputRect.top + inputRect.height / 2)) < 45) score += 18;
-    return score;
+    return CaptchaDetect.scoreInputAssociation({
+      metadata: textOf(input),
+      labelText: associatedLabelText(input),
+      localContext: localInputContext(input),
+      maxLength: input.maxLength,
+      hasValue: Boolean(input.value),
+      imageRect: image.getBoundingClientRect(),
+      inputRect: input.getBoundingClientRect(),
+    });
   };
 
   const images = Array.from(document.querySelectorAll("img, canvas")).filter(visible);

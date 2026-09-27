@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.error
@@ -19,9 +20,25 @@ from typing import Iterable
 from urllib.parse import parse_qs, urlsplit
 
 
-ROOT = Path(__file__).resolve().parent
-MODEL_ROOT = ROOT / "models"
-TRAINING_ROOT = ROOT / "training"
+def resolve_runtime_roots(
+    *,
+    module_file: str | Path = __file__,
+    executable: str | Path | None = None,
+    frozen: bool | None = None,
+) -> tuple[Path, Path]:
+    """Return (bundled resources root, user-visible application root)."""
+    bundle_root = Path(module_file).resolve().parent
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if not is_frozen:
+        return bundle_root, bundle_root
+    executable_path = Path(executable or sys.executable).resolve()
+    return bundle_root, executable_path.parent
+
+
+BUNDLE_ROOT, APP_ROOT = resolve_runtime_roots()
+ROOT = APP_ROOT
+MODEL_ROOT = BUNDLE_ROOT / "models"
+TRAINING_ROOT = APP_ROOT / "training"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -974,6 +991,13 @@ class OcrEngine:
     def names(self):
         return [name for name, _ in self.solvers]
 
+    @property
+    def loaded_model_names(self):
+        names = self.names
+        if self.fusion is not None:
+            names.append("fusion_v7")
+        return names
+
     def recognize(self, image_bytes: bytes, expected_length: int | None = None) -> dict:
         variants = list(image_variants(image_bytes))
         predictions = []
@@ -1222,7 +1246,7 @@ def run_server(host=DEFAULT_HOST, port=DEFAULT_PORT):
             return False
         raise
     print(f"Steven 驗證碼 OCR 服務已啟動：http://{host}:{port}")
-    print("已載入模型：" + ", ".join(ENGINE.names))
+    print("已載入模型：" + ", ".join(ENGINE.loaded_model_names))
     print("關閉此視窗或按 Ctrl+C 可停止服務。")
     try:
         server.serve_forever(poll_interval=0.25)
@@ -1242,6 +1266,7 @@ def main():
     mode.add_argument("--check-running", action="store_true")
     mode.add_argument("--feedback-report", action="store_true")
     mode.add_argument("--dataset-manifest", action="store_true")
+    mode.add_argument("--print-runtime-paths", action="store_true")
     parser.add_argument("--report-output", type=Path)
     parser.add_argument("--manifest-output", type=Path)
     parser.add_argument("--manifest-seed", type=int, default=20260809)
@@ -1251,6 +1276,20 @@ def main():
         default="image_hash",
     )
     args = parser.parse_args()
+    if args.print_runtime_paths:
+        print(
+            json.dumps(
+                {
+                    "frozen": bool(getattr(sys, "frozen", False)),
+                    "bundle_root": str(BUNDLE_ROOT),
+                    "app_root": str(APP_ROOT),
+                    "model_root": str(MODEL_ROOT),
+                    "training_root": str(TRAINING_ROOT),
+                },
+                ensure_ascii=True,
+            )
+        )
+        return 0
     if args.feedback_report:
         report = build_feedback_report()
         rendered = json.dumps(report, ensure_ascii=False, indent=2)
@@ -1272,7 +1311,7 @@ def main():
         return 0
     if args.check:
         ENGINE.load()
-        print("OCR service check ok: " + ", ".join(ENGINE.names))
+        print("OCR service check ok: " + ", ".join(ENGINE.loaded_model_names))
         return 0
     if args.check_running:
         return 0 if matching_service_is_running(args.host, args.port) else 1

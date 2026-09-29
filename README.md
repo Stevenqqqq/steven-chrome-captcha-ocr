@@ -34,6 +34,9 @@
 ## 一般使用者：下載 ZIP 即可使用
 
 1. 到 GitHub **Releases** 下載 `StevenCaptchaOCR-Windows-x64-v版本.zip`。
+
+   [前往 GitHub Release 下載頁](https://github.com/Stevenqqqq/steven-chrome-captcha-ocr/releases/latest)
+
 2. 將 ZIP **完整解壓縮**到桌面、文件或 D 槽的一般資料夾；不要直接在 ZIP 內執行，也不要放到 `Program Files`。
 3. 雙擊 `StevenCaptchaOCR.exe`，將終端保持開啟或最小化；關閉終端就會停止 OCR 服務。
 4. 雙擊 `開啟Chrome擴充功能頁.bat`，或手動開啟 `chrome://extensions`。

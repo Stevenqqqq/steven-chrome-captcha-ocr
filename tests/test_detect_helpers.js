@@ -1,10 +1,15 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const { resolve } = require("node:path");
+const { runInNewContext } = require("node:vm");
 
 const {
   compareCandidates,
   imageIdentity,
+  inferInputHints,
   originalImageDataUrl,
+  queryAllDeep,
   rankCandidates,
   scoreInputAssociation,
 } = require("../extension/detect_helpers.js");
@@ -190,4 +195,182 @@ test("does not allocate a canvas for oversized page images", () => {
   });
 
   assert.equal(result, "");
+});
+
+test("queries nested open shadow roots without duplicating light DOM matches", () => {
+  const match = { tagName: "INPUT" };
+  const inner = { querySelectorAll: (selector) => selector === "*" || selector === "input" ? [match] : [] };
+  const nestedHost = { shadowRoot: inner };
+  const outer = { querySelectorAll: (selector) => selector === "*" ? [nestedHost] : [] };
+  const root = { querySelectorAll: (selector) => selector === "*" ? [{ shadowRoot: outer }, {}] : [] };
+  assert.deepEqual(queryAllDeep(root, "input"), [match]);
+});
+
+test("excludes disabled and read-only candidates from input ranking", () => {
+  assert.equal(scoreInputAssociation({ metadata: "captcha", disabled: true }), -Infinity);
+  assert.equal(scoreInputAssociation({ metadata: "captcha", readOnly: true }), -Infinity);
+});
+
+test("infers exact length from equal field limits, fixed patterns, and explicit text", () => {
+  assert.deepEqual(inferInputHints({ minLength: 5, maxLength: 5 }), {
+    expectedLength: 5, lengthMode: "exact", charsetHint: "alphanumeric", caseSensitive: false,
+  });
+  assert.deepEqual(inferInputHints({ pattern: "^[0-9]{4}$", maxLength: 6 }), {
+    expectedLength: 4, lengthMode: "exact", charsetHint: "digits", caseSensitive: false,
+  });
+  for (const labelText of ["4碼", "4位", "4 digits", "4 characters"]) {
+    assert.equal(inferInputHints({ labelText }).expectedLength, 4);
+    assert.equal(inferInputHints({ labelText }).lengthMode, "exact");
+  }
+});
+
+test("distinguishes max length, numeric fields, letters, mixed hints and case", () => {
+  assert.deepEqual(inferInputHints({ maxLength: 6, metadata: "最多 6 碼，純英文，區分大小寫" }), {
+    expectedLength: 6, lengthMode: "max", charsetHint: "letters", caseSensitive: true,
+  });
+  for (const hints of [{ type: "number" }, { inputMode: "numeric" }, { pattern: "\\d{4}" }, { labelText: "純數字" }]) {
+    assert.equal(inferInputHints(hints).charsetHint, "digits");
+  }
+  assert.equal(inferInputHints({ pattern: "[A-Za-z]" }).charsetHint, "letters");
+  assert.equal(inferInputHints({ localContext: "數字驗證碼 or letters" }).charsetHint, "alphanumeric");
+  assert.equal(inferInputHints({ labelText: "not case sensitive" }).caseSensitive, false);
+  assert.deepEqual(inferInputHints({ pattern: "[A-Za-z0-9]{3,6}", maxLength: 99 }), {
+    expectedLength: null, lengthMode: "unknown", charsetHint: "alphanumeric", caseSensitive: false,
+  });
+});
+
+test("identifies changed pixels at the same URL and ignores URL changes for identical pixels", () => {
+  const image = { tagName: "IMG", currentSrc: "https://example.com/captcha.png", naturalWidth: 80, naturalHeight: 30 };
+  const first = imageIdentity(image, "data:image/png;base64,YQ==");
+  assert.notEqual(first, imageIdentity(image, "data:image/png;base64,Yg=="));
+  assert.equal(first, imageIdentity({ ...image, currentSrc: "https://example.com/new.png" }, "data:image/png;base64,YQ=="));
+});
+
+test("captures valid canvas data and identifies changes after a redraw", () => {
+  let data = "data:image/png;base64,YQ==";
+  const canvas = {
+    tagName: "CANVAS", width: 80, height: 30,
+    toDataURL(type) {
+      assert.equal(type, "image/png");
+      return data;
+    },
+  };
+  assert.equal(originalImageDataUrl(canvas), data);
+  const first = imageIdentity(canvas, originalImageDataUrl(canvas));
+  data = "data:image/png;base64,Yg==";
+  assert.notEqual(first, imageIdentity(canvas, originalImageDataUrl(canvas)));
+  assert.equal(originalImageDataUrl({ ...canvas, width: 9 }), "");
+  assert.equal(originalImageDataUrl({ ...canvas, height: 100_000 }), "");
+  data = "data:,";
+  assert.equal(originalImageDataUrl(canvas), "");
+  assert.equal(originalImageDataUrl({ tagName: "svg" }), "");
+});
+
+const detector = readFileSync(resolve(__dirname, "../extension/detect.js"), "utf8");
+
+function detectionFixture() {
+  const inputSelector = "input:not([type]), input[type='text'], input[type='tel'], input[type='search'], input[type='number']";
+  const rect = (left, top, width, height) => ({
+    left, top, width, height, right: left + width, bottom: top + height,
+  });
+  const group = {};
+  const element = (tagName, attrs, bounds, details = {}) => ({
+    id: attrs.id,
+    tagName,
+    parentNode: group,
+    getAttribute: (name) => attrs[name] ?? null,
+    setAttribute: (name, value) => { attrs[name] = value; },
+    removeAttribute: (name) => { delete attrs[name]; },
+    closest: () => null,
+    getBoundingClientRect: () => bounds,
+    matches: (selector) => selector === inputSelector && tagName === "INPUT",
+    ...details,
+  });
+  const input = element("INPUT", { id: "captcha", placeholder: "4位數字驗證碼" }, rect(10, 20, 80, 25), {
+    type: "number", value: "", getRootNode: () => shadow,
+  });
+  const disabled = { ...input, disabled: true, setAttribute: () => assert.fail("disabled input tagged") };
+  const readonly = { ...input, readOnly: true, setAttribute: () => assert.fail("read-only input tagged") };
+  const svg = element("svg", { id: "challenge" }, rect(100, 20, 80, 30));
+  const icon = element("svg", { id: "captcha-icon" }, rect(100, 20, 20, 20));
+  const shadow = {
+    querySelectorAll(selector) {
+      if (selector === "*") return [input, disabled, readonly, svg, icon];
+      if (selector === inputSelector) return [disabled, readonly, input];
+      if (selector === "img, canvas, svg") return [icon, svg];
+      if (selector === "#challenge") return [svg];
+      if (selector === "#captcha") return [input];
+      return [];
+    },
+  };
+  const viewport = { innerWidth: 800, innerHeight: 600 };
+  const getComputedStyle = () => ({ opacity: "1", visibility: "visible", backgroundImage: "none" });
+  const parent = { ...viewport, getComputedStyle };
+  parent.top = parent;
+  const window = {
+    innerWidth: 240, innerHeight: 180, top: parent, parent,
+    frameElement: { getBoundingClientRect: () => rect(30, 40, 244, 184), clientLeft: 2, clientTop: 2, offsetWidth: 244, offsetHeight: 184 },
+  };
+  const document = { querySelectorAll: (selector) => selector === "*" ? [{ shadowRoot: shadow }] : [] };
+  return {
+    input,
+    context: {
+      document, window, innerWidth: window.innerWidth, innerHeight: window.innerHeight, getComputedStyle,
+      CaptchaDetect: require("../extension/detect_helpers.js"),
+      XMLSerializer: class {
+        serializeToString(node) {
+          assert.equal(node, svg);
+          return '<svg xmlns="http://www.w3.org/2000/svg"><text>1234</text></svg>';
+        }
+      },
+    },
+  };
+}
+
+test("detects an adjacent SVG and editable number input in a shadow root inside an iframe", async () => {
+  const { input, context } = detectionFixture();
+  const result = await runInNewContext(detector, context);
+  assert.equal(result.ok, true);
+  assert.equal(result.matchedByProfile, false);
+  assert.equal(result.expectedLength, 4);
+  assert.equal(result.lengthMode, "exact");
+  assert.equal(result.charsetHint, "digits");
+  assert.match(result.svgMarkup, /1234/);
+  assert.equal(result.sourceDataUrl, "");
+  assert.equal(result.rect.left, 132);
+  assert.equal(result.rect.top, 62);
+  assert.equal(result.viewport.width, 800);
+  assert.equal(input.getAttribute("data-steven-captcha-target"), result.token);
+});
+
+test("uses and clears the supplied profile and falls back when its selectors are stale", async () => {
+  const { context } = detectionFixture();
+  context.__STEVEN_OCR_SITE_PROFILE__ = {
+    imageSelector: "#challenge", inputSelector: "#captcha",
+    expectedLength: 5, lengthMode: "max", charsetHint: "digits", caseSensitive: true,
+  };
+  const result = await runInNewContext(detector, context);
+  assert.equal(result.matchedByProfile, true);
+  assert.equal(result.expectedLength, 5);
+  assert.equal(result.lengthMode, "max");
+  assert.equal(result.caseSensitive, true);
+  assert.equal(Object.hasOwn(context, "__STEVEN_OCR_SITE_PROFILE__"), false);
+  context.__STEVEN_OCR_SITE_PROFILE__ = { imageSelector: "#missing", inputSelector: "#captcha" };
+  assert.equal((await runInNewContext(detector, context)).matchedByProfile, false);
+});
+
+test("reads a profile for the current frame origin from extension local storage", async () => {
+  const { context } = detectionFixture();
+  const profile = {
+    origin: "https://example.com", imageSelector: "#challenge", inputSelector: "#captcha",
+    expectedLength: 6, lengthMode: "max", charsetHint: "digits", caseSensitive: false,
+  };
+  context.SiteProfiles = require("../extension/site_profiles.js");
+  context.location = { href: "https://example.com/frame" };
+  context.chrome = { storage: { local: {
+    get: async (key) => ({ [key]: { [profile.origin]: profile } }),
+  } } };
+  const result = await runInNewContext(detector, context);
+  assert.equal(result.matchedByProfile, true);
+  assert.equal(result.expectedLength, 6);
 });

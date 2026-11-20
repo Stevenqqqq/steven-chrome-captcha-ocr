@@ -2,13 +2,107 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const { runInNewContext } = require("node:vm");
 
 const {
   closeAfterSuccessfulFill,
   isNewCaptcha,
   isShortcutInvocation,
+  selectFrameDetection,
   startPopup,
 } = require("../extension/popup_startup.js");
+
+test("chooses the highest-scoring successful frame and retains its fill token and frame ID", () => {
+  const result = selectFrameDetection([
+    { frameId: 0, result: { ok: true, score: 70, token: "main" } },
+    { frameId: 2, result: { ok: false, score: 900 } },
+    { frameId: 3 },
+    { frameId: 5, result: { ok: true, score: 100, token: "iframe" } },
+  ]);
+  assert.deepEqual(result, { ok: true, score: 100, token: "iframe", frameId: 5 });
+  assert.equal(selectFrameDetection([{ frameId: 0 }]).ok, false);
+});
+
+test("resolves frame-score ties independently of injection result ordering", () => {
+  const result = { ok: true, score: 100 };
+  assert.equal(selectFrameDetection([{ frameId: 3, result }, { frameId: 0, result }]).frameId, 0);
+});
+
+test("popup requests rasterized PNG with hints and fills the chosen shadow iframe without selecting a number input", async () => {
+  const popup = fs.readFileSync(path.join(__dirname, "../extension/popup.js"), "utf8");
+  const png = new Blob(["rasterized"], { type: "image/png" });
+  const page = new Map();
+  const inputEvents = [];
+  class Input {
+    type = "number";
+    set value(value) { this.currentValue = value; }
+    get value() { return this.currentValue; }
+    matches() { return false; }
+    dispatchEvent(event) { inputEvents.push(event.type); }
+    focus() {}
+    select() { assert.fail("number input cannot be selected"); }
+    removeAttribute() {}
+  }
+  const input = new Input();
+  let saved;
+  const context = {
+    document: { querySelector(selector) {
+      if (!page.has(selector)) page.set(selector, {
+        textContent: "", addEventListener() {}, classList: { toggle() {} },
+      });
+      return page.get(selector);
+    } },
+    window: { close() {}, },
+    CSS: { escape: (text) => text },
+    Event,
+    HTMLInputElement: Input,
+    CaptchaDetect: { queryAllDeep(_document, selector) {
+      assert.equal(selector, 'input[data-steven-captcha-target="frame-token"]');
+      return [input];
+    } },
+    CaptchaImage: {
+      ...require("../extension/captcha_image.js"),
+      async rasterizeSvgCaptcha(markup) {
+        assert.equal(markup, "<svg/>");
+        return png;
+      },
+    },
+    FeedbackHelpers: require("../extension/feedback_helpers.js"),
+    PopupStartup: { ...require("../extension/popup_startup.js"), startPopup() {} },
+    chrome: {
+      tabs: { query: async () => [{ id: 11 }] },
+      storage: { session: { async set(value) { saved = value.pendingFeedback; } } },
+      scripting: {
+        async executeScript({ target, files, func, args }) {
+          assert.equal(target.tabId, 11);
+          if (files) {
+            assert.equal(target.allFrames, true);
+            assert.equal(files.join(","), "site_profiles.js,detect_helpers.js,detect.js");
+            return [
+              { frameId: 0, result: { ok: true, score: 30 } },
+              { frameId: 4, result: {
+                ok: true, score: 50, token: "frame-token", svgMarkup: "<svg/>",
+                expectedLength: 5, lengthMode: "max", charsetHint: "digits", caseSensitive: true,
+              } },
+            ];
+          }
+          assert.equal(target.frameIds.join(","), "4");
+          return [{ result: func(...args) }];
+        },
+      },
+    },
+    fetch: async (url, request) => {
+      assert.equal(url, "http://127.0.0.1:8765/recognize?expectedLength=5&lengthMode=max&charsetHint=digits&caseSensitive=1");
+      assert.equal(request.body, png);
+      return { ok: true, json: async () => ({ ok: true, answer: "012", length_match: false }) };
+    },
+  };
+  await runInNewContext(popup + "\nrecognizeCurrentPage();", context);
+  assert.equal(input.value, "012");
+  assert.deepEqual(inputEvents, ["input", "change"]);
+  assert.match(saved.captchaIdentity, /^png:[a-f0-9]{64}$/);
+  assert.equal(page.get("#statusText").textContent, "已填入驗證碼");
+});
 
 
 test("successful filling closes the popup so Enter returns to the page", () => {
@@ -158,12 +252,14 @@ test("does not recognize when the OCR service is offline", async () => {
 });
 
 
-test("manifest grants storage for feedback that survives popup closure", () => {
+test("manifest grants storage and offscreen with wasm-unsafe-eval CSP", () => {
   const manifestPath = path.join(__dirname, "..", "extension", "manifest.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 
   assert.ok(manifest.permissions.includes("storage"));
-  assert.equal(manifest.version, "1.8.2");
+  assert.ok(manifest.permissions.includes("offscreen"));
+  assert.match(manifest.content_security_policy?.extension_pages || "", /wasm-unsafe-eval/);
+  assert.equal(manifest.version, "2.0.0");
 });
 
 

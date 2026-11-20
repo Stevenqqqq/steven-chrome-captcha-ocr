@@ -48,3 +48,19 @@ test("describes stored error types in Traditional Chinese", () => {
   assert.equal(FeedbackHelpers.describeErrorType("substitution"), "字元誤判");
   assert.equal(FeedbackHelpers.describeErrorType("unknown"), "未分類錯誤");
 });
+
+test("a bounded maximum accepts shorter answers despite the legacy server's exact-length flag", () => {
+  assert.equal(FeedbackHelpers.shouldAutoFill("aB2", 5, null, "max", true), true);
+  assert.equal(FeedbackHelpers.shouldAutoFill("aB2", 5, true, "max", true), true);
+  assert.equal(FeedbackHelpers.shouldAutoFill("aB2", 5, false, "max", true), true);
+  assert.equal(FeedbackHelpers.shouldAutoFill("aB2", 5, true, "exact", true), false);
+  assert.equal(FeedbackHelpers.shouldAutoFill("aB2345", 5, true, "max"), false);
+  assert.equal(FeedbackHelpers.shouldAutoFill("AB", 5, true, "max"), false);
+});
+
+test("case-sensitive validation preserves ASCII case and rejects Unicode uppercase conversions", () => {
+  assert.equal(FeedbackHelpers.shouldAutoFill("aB2", 3, true, "exact", true), true);
+  assert.equal(FeedbackHelpers.shouldAutoFill("ß2", 3, true, "exact", true), false);
+  assert.equal(FeedbackHelpers.shouldAutoFill("ß2", 3, true), true);
+  assert.equal(FeedbackHelpers.isPendingFeedback({ reportId: "a".repeat(32), answer: "aB2", caseSensitive: true }), true);
+});

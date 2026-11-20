@@ -399,6 +399,21 @@ class FeedbackStoreTests(unittest.TestCase):
             self.assertEqual(report["total_occurrences"], 2)
             self.assertEqual(report["occurrence_error_types"], {"missing_character": 2})
 
+    def test_index_survives_restart_and_recovers_from_a_missing_file(self):
+        for folder, field in [("feedback", "metadata_file"), ("samples", "image_file")]:
+            with self.subTest(folder=folder), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = ocr_server.FeedbackStore(root)
+                image = self.make_png()
+                result = {"answer": "QJA"}
+                first = store.confirm(store.remember(image, 4, result), "QIJA")
+                store = ocr_server.FeedbackStore(root)
+                self.assertTrue(store.confirm(store.remember(image, 4, result), "QIJA")["duplicate"])
+                with patch.object(Path, "glob", side_effect=AssertionError("unexpected directory scan")):
+                    self.assertTrue(store.confirm(store.remember(image, 4, result), "QIJA")["duplicate"])
+                (root / folder / first[field]).unlink()
+                self.assertFalse(store.confirm(store.remember(image, 4, result), "QIJA")["duplicate"])
+
     def test_rejects_conflicting_labels_for_the_same_image(self):
         with TemporaryDirectory() as directory:
             store = ocr_server.FeedbackStore(Path(directory))
@@ -585,6 +600,58 @@ class PolarityNormalizationTests(unittest.TestCase):
         variants = list(ocr_server.image_variants(output.getvalue()))
 
         self.assertEqual(variants[0][0], "dark_primary")
+
+
+class HintsAndConfidenceTests(unittest.TestCase):
+    def test_max_length_mode_and_charset_hint_return_rich_confidence_metadata(self):
+        predictions = [
+            {"solver": "official", "variant": "raw", "answer": "0128"},
+            {"solver": "official", "variant": "gray", "answer": "0128"},
+            {"solver": "universal", "variant": "raw", "answer": "O128"},
+            {"solver": "universal", "variant": "gray", "answer": "012B"},
+        ]
+
+        result = ocr_server.choose_ensemble(
+            predictions,
+            expected_length=6,
+            length_mode="max",
+            charset_hint="digits",
+        )
+
+        self.assertEqual(result["answer"], "0128")
+        self.assertTrue(result["length_match"])
+        self.assertEqual(result["length_mode"], "max")
+        self.assertEqual(result["charset_hint"], "digits")
+        self.assertEqual(result["confidence"], 1.0)
+        self.assertEqual(len(result["char_confidences"]), 4)
+        self.assertEqual(result["top_candidates"][0]["answer"], "0128")
+
+    def test_case_sensitive_preserves_ascii_letter_case_and_char_alternatives(self):
+        predictions = [
+            {"solver": "official", "variant": "raw", "answer": "aB7k"},
+            {"solver": "official", "variant": "gray", "answer": "aB7k"},
+            {"solver": "universal", "variant": "raw", "answer": "aB7K"},
+        ]
+
+        result = ocr_server.choose_ensemble(predictions, case_sensitive=True)
+
+        self.assertEqual(result["answer"], "aB7k")
+        self.assertTrue(result["case_sensitive"])
+        self.assertEqual(result["char_confidences"][3]["char"], "k")
+        self.assertLess(result["char_confidences"][3]["confidence"], 1.0)
+        self.assertIn("K", result["char_confidences"][3]["alternatives"])
+
+    def test_hint_parsers_validate_bounds(self):
+        self.assertEqual(ocr_server.parse_length_mode("max"), "max")
+        self.assertEqual(ocr_server.parse_charset_hint("digits"), "digits")
+        self.assertTrue(ocr_server.parse_case_sensitive("1"))
+        self.assertFalse(ocr_server.parse_case_sensitive("0"))
+        with self.assertRaises(ocr_server.OcrError):
+            ocr_server.parse_length_mode("minimum")
+        with self.assertRaises(ocr_server.OcrError):
+            ocr_server.parse_charset_hint("emoji")
+        with self.assertRaises(ocr_server.OcrError):
+            ocr_server.parse_case_sensitive("yes")
 
 
 if __name__ == "__main__":

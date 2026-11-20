@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-.venv/
+.venv*/
 venv/
 env/
 *.log
@@ -17,6 +17,10 @@ Thumbs.db
 models/*/custom.onnx
 models/*/charsets.json
 models/fusion_v7/*
+extension/models/*
+!extension/models/.gitkeep
+extension/vendor/ort/*
+!extension/vendor/ort/.gitkeep
 
 training/samples/*
 !training/samples/.gitkeep

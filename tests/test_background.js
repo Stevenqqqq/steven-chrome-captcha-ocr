@@ -3,8 +3,10 @@ const assert = require("node:assert/strict");
 
 const {
   DEFAULT_POPUP,
+  OFFSCREEN_DOCUMENT,
   SHORTCUT_COMMAND,
   SHORTCUT_POPUP,
+  ensureOffscreenDocument,
   openShortcutPopup,
   registerShortcut,
 } = require("../extension/background.js");
@@ -74,4 +76,28 @@ test("only the recognition command opens the popup", async () => {
     "open",
     `set:${DEFAULT_POPUP}`,
   ]);
+});
+
+
+test("ensureOffscreenDocument creates once and skips when context already exists", async () => {
+  let created = 0;
+  let existing = [];
+  const chromeApi = {
+    runtime: {
+      getURL: (p) => `chrome-extension://test/${p}`,
+      getContexts: async () => existing,
+    },
+    offscreen: {
+      createDocument: async (opts) => {
+        created += 1;
+        assert.equal(opts.url, OFFSCREEN_DOCUMENT);
+        existing = [{ documentUrl: `chrome-extension://test/${opts.url}` }];
+      },
+    },
+  };
+
+  await Promise.all([ensureOffscreenDocument(chromeApi), ensureOffscreenDocument(chromeApi)]);
+  assert.equal(created, 1);
+  await ensureOffscreenDocument(chromeApi);
+  assert.equal(created, 1);
 });

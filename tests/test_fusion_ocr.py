@@ -219,6 +219,61 @@ class BundleValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(fusion_ocr.FusionModelError, "light_reranker.npz"):
                 fusion_ocr.Fixed4FusionOcr(folder)
 
+    def test_light_reranker_config_bounds_accept_tuned_values_and_reject_out_of_range(self):
+        import hashlib
+        import json
+        import ocr_server
+
+        with TemporaryDirectory() as directory:
+            folder = Path(directory)
+            npz_path = folder / "light_reranker.npz"
+            shapes = ((128, 144), (128,), (128,), (128,), (64, 128), (64,), (1, 64), (1,))
+            np.savez(npz_path, **{f"param_{i}": np.zeros(shape, dtype=np.float32) for i, shape in enumerate(shapes)})
+            npz_sha = hashlib.sha256(npz_path.read_bytes()).hexdigest()
+            np.savez(
+                folder / "reranker.npz",
+                mean=np.zeros(145, dtype=np.float32),
+                std=np.ones(145, dtype=np.float32),
+                w0=np.zeros((8, 145), dtype=np.float32),
+                b0=np.zeros(8, dtype=np.float32),
+                w1=np.zeros((4, 8), dtype=np.float32),
+                b1=np.zeros(4, dtype=np.float32),
+                w2=np.zeros((1, 4), dtype=np.float32),
+                b2=np.zeros(1, dtype=np.float32),
+            )
+            (folder / "direct.onnx").write_bytes(b"fake")
+            (folder / "crop.onnx").write_bytes(b"fake")
+            base_cfg = {
+                "charset": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                "alpha": 1.0,
+                "beta": 1.0,
+                "threshold": 0.5,
+                "feature_names": fusion_ocr.feature_names(),
+                "light_reranker": {
+                    "feature_version": fusion_ocr.LIGHT_FEATURE_VERSION,
+                    "feature_names": fusion_ocr.light_feature_names(),
+                    "feature_dim": len(fusion_ocr.light_feature_names()),
+                    "variants": list(fusion_ocr.LIGHT_VARIANTS),
+                    "beam_width": 96,
+                    "topn": 8,
+                    "threshold": 0.42,
+                    "margin": 0.05,
+                    "layer_norm_eps": 1e-5,
+                    "source_sha256": npz_sha,
+                },
+            }
+            (folder / "config.json").write_text(json.dumps(base_cfg), encoding="utf-8")
+            with patch("onnxruntime.InferenceSession", return_value=object()):
+                loaded = fusion_ocr.Fixed4FusionOcr(folder)
+            self.assertEqual(loaded.light_threshold, 0.42)
+            self.assertEqual(loaded.light_margin, 0.05)
+
+            bad_cfg = json.loads(json.dumps(base_cfg))
+            bad_cfg["light_reranker"]["threshold"] = 1.5
+            (folder / "config.json").write_text(json.dumps(bad_cfg), encoding="utf-8")
+            with self.assertRaisesRegex(fusion_ocr.FusionModelError, "gate"):
+                fusion_ocr.Fixed4FusionOcr(folder)
+
 
 if __name__ == "__main__":
     unittest.main()

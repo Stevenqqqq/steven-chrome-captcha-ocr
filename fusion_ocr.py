@@ -415,11 +415,16 @@ class Fixed4FusionOcr:
             self.light_eps = float(light_config.get("layer_norm_eps", 1e-5))
         except (TypeError, ValueError) as error:
             raise FusionModelError("light reranker 設定格式不相容") from error
-        if beam_width != 160:
+        if not (1 <= beam_width <= 1024):
             raise FusionModelError("light reranker beam_width 不相容")
-        if topn != 5:
+        if not (1 <= topn <= 50):
             raise FusionModelError("light reranker topn 不相容")
-        if self.light_threshold != 0.35 or self.light_margin != 0.02:
+        if (
+            not math.isfinite(self.light_threshold)
+            or not (0.0 <= self.light_threshold <= 1.0)
+            or not math.isfinite(self.light_margin)
+            or not (0.0 <= self.light_margin <= 1.0)
+        ):
             raise FusionModelError("light reranker gate 不相容")
         if not math.isfinite(self.light_eps) or self.light_eps <= 0:
             raise FusionModelError("light reranker LayerNorm epsilon 不相容")

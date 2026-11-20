@@ -34,13 +34,21 @@
 
 ## 第一次安裝
 
+### 模式 A：純瀏覽器離線 ONNX（免開 Python 黑窗，v2.0 新增）
+
+1. 執行一次資產準備腳本，拉取鎖定版本 `onnxruntime-web` 與同步本機模型清單至擴充功能（相關檔案預設不提交到 Git）：
+   ```powershell
+   py -3.10 scripts\prepare_browser_bundle.py
+   ```
+2. 雙擊 `開啟Chrome擴充功能頁.bat`，開啟右上角「開發人員模式」→ 點「載入未封裝項目」→ 選擇 `extension` 資料夾。
+3. 將「Steven 驗證碼 OCR 助手」固定在工具列；不啟動 Python 即可於 Chrome MV3 Offscreen Document 本地執行 ONNX 離線推論。
+
+### 模式 B：本機 Python 服務（完整多模型投票與訓練回饋）
+
 1. 雙擊 `安裝依賴.bat`。
 2. 雙擊 `啟動OCR服務.bat`，將終端保持開啟或最小化；關閉終端就會停止 OCR 服務。
-3. 雙擊 `開啟Chrome擴充功能頁.bat`。
-4. 開啟右上角「開發人員模式」。
-5. 點「載入未封裝項目」。
-6. 選擇本專案內的 `extension` 資料夾。
-7. 將「Steven 驗證碼 OCR 助手」固定在 Chrome 工具列。
+3. 雙擊 `開啟Chrome擴充功能頁.bat`，開啟「開發人員模式」→「載入未封裝項目」→ 選擇 `extension` 資料夾。
+4. 擴充功能右上角膠囊可一鍵切換 **離線 ONNX ↔ 本機 Python**；離線模式下糾正的錯題可暫存於本機並匯出 JSON。
 
 安裝程式會在專案內建立 `.venv`，不會把依賴直接裝進全域 Python。若要重建環境，可先關閉 OCR 服務，再刪除 `.venv` 並重新執行安裝程式。
 
@@ -48,9 +56,17 @@ GitHub 發布版預設使用 `ddddocr` 套件內建的 `official` 模型，因�
 
 ## 使用
 
-1. 先啟動 `啟動OCR服務.bat`。
-2. 開啟含有可見驗證碼與輸入框的網站。
-3. 按 `Ctrl+Shift+Y` 即可辨識並填入；成功後彈窗會自動關閉，可直接按 `Enter` 送出。進入下一題後再按一次會自動偵測新圖片。若 OCR 字元數與網頁要求不同，擴充功能會拒絕自動填入並保留該題供人工回報。
+1. 若使用本機 Python 模式，先啟動 `啟動OCR服務.bat`；若已準備離線 ONNX，可直接免開終端使用。
+2. 開啟含有可見驗證碼與輸入框的網站（支援一般 DOM、open Shadow DOM、同源 iframe、`<canvas>`、inline `<svg>` 與 `input[type="number"]`）。
+3. **快捷鍵流程**：按 `Ctrl+Shift+Y` 辨識並填入後，頁面輸入框旁會浮現**不搶焦點的輕量浮動小條**（3.5 秒自動淡出、滑鼠懸停暫停），可直接按 `Enter` 送出或點一下切換 Top-2/3 候選。
+4. **工具列彈窗 v2.0**：點擊擴充功能圖示可檢視**擷取縮圖預覽、逐字信心格、Top-3 候選（支援鍵盤 `1/2/3` 快切）**與收合式錯題糾正抽屜。
+5. **手動點選綁定（Element Picker）**：遇到特殊版面抓不到時，點彈窗「點選目標」依序點選圖片與輸入框，即可記住該網域規則（Site Profile）與字數／字元集提示。
+
+產生本地互動式資料集與錯題審查儀表板：
+
+```powershell
+py -3.10 training\dashboard.py --output tests\results\dataset_dashboard.html
+```
 
 <details>
 <summary>進階：錯題回報與模型資料</summary>

@@ -77,7 +77,7 @@ class ApiTests(unittest.TestCase):
         with self.request("/health") as response:
             payload = json.load(response)
             self.assertEqual(payload["solvers"], FakeEngine.names)
-            self.assertEqual(payload["version"], 6)
+            self.assertEqual(payload["version"], 7)
             self.assertEqual(response.headers["Access-Control-Allow-Origin"], "chrome-extension://unit-test")
 
     def test_recognize_returns_answer(self):
@@ -189,6 +189,27 @@ class ApiTests(unittest.TestCase):
             self.request("/recognize?expectedLength=999", b"test-image")
 
         self.assertEqual(context.exception.code, 422)
+
+    def test_restricted_origins_require_an_exact_extension_match(self):
+        with patch.dict("os.environ", {"OCR_ALLOWED_EXTENSION_IDS": " first , second "}):
+            for origin in ("", "chrome-extension://first", "chrome-extension://second"):
+                with self.request("/health", origin=origin) as response:
+                    self.assertEqual(response.status, 200)
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request("/health", origin="chrome-extension://first.evil")
+            self.assertEqual(error.exception.code, 403)
+
+    def test_token_required_for_get_and_post_but_optional_for_preflight(self):
+        url = f"http://127.0.0.1:{self.port}"
+        with patch.dict("os.environ", {"OCR_API_TOKEN": "test-token"}):
+            for method, path, headers in [("GET", "/health", {}), ("POST", "/feedback", {"X-OCR-Token": "wrong"})]:
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(urllib.request.Request(url + path, headers=headers, method=method), timeout=5)
+                self.assertEqual(error.exception.code, 403)
+            self.assertTrue(ocr_server.matching_service_is_running(port=self.port))
+            with urllib.request.urlopen(urllib.request.Request(url + "/feedback", method="OPTIONS"), timeout=5) as response:
+                self.assertEqual(response.status, 204)
+                self.assertIn("X-OCR-Token", response.headers["Access-Control-Allow-Headers"])
 
     def test_regular_web_origin_is_rejected(self):
         with self.assertRaises(urllib.error.HTTPError) as context:

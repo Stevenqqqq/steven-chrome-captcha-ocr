@@ -15,6 +15,18 @@
     return detection.inputHasValue === false;
   }
 
+  function selectFrameDetection(injections) {
+    let best = null;
+    for (const { result, frameId } of injections) {
+      if (!result?.ok || !Number.isFinite(result.score) || !Number.isInteger(frameId)) continue;
+      if (!best || result.score > best.score
+        || (result.score === best.score && frameId < best.frameId)) {
+        best = { ...result, frameId };
+      }
+    }
+    return best || { ok: false, error: "找不到可見的驗證碼圖片與輸入框" };
+  }
+
   function closeAfterSuccessfulFill(windowRef) {
     if (typeof windowRef?.close === "function") windowRef.close();
   }
@@ -59,6 +71,7 @@
     closeAfterSuccessfulFill,
     isNewCaptcha,
     isShortcutInvocation,
+    selectFrameDetection,
     startPopup,
   };
 }));

@@ -95,6 +95,40 @@ class ReleaseGateTests(unittest.TestCase):
                 self.make_policy(),
             )
 
+    def test_supports_independent_manifests_and_baselines_per_profile(self):
+        letters_manifest = {
+            "entries": [
+                {"split": "test", "label": "ABCD"},
+                {"split": "test", "label": "EFGH"},
+            ]
+        }
+        letters_baseline = {
+            "current": {"test": {"count": 2, "accuracy": 1.0, "character_accuracy": 1.0, "no_answer": 0}}
+        }
+        alnum_manifest = {
+            "entries": [{"split": "test", "label": label} for label in ("O0I1", "Z2S5", "G6B8", "3479")]
+        }
+        alnum_baseline = {
+            "current": {"test": {"count": 4, "accuracy": 0.95, "character_accuracy": 0.99, "no_answer": 0}}
+        }
+        policy = self.make_policy()
+        policy["profiles"]["alphanumeric"]["minimum_test_samples"] = 4
+
+        result = release_gate.evaluate_release_readiness(
+            letters_manifest,
+            letters_baseline,
+            policy,
+            profile_inputs={
+                "letters": (letters_manifest, letters_baseline),
+                "alphanumeric": (alnum_manifest, alnum_baseline),
+            },
+        )
+
+        self.assertTrue(result["profiles"]["letters"]["passed"])
+        self.assertTrue(result["profiles"]["alphanumeric"]["passed"])
+        self.assertTrue(result["github_release_ready"])
+        self.assertEqual(result["schema_version"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

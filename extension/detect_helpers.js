@@ -17,9 +17,9 @@
   }
 
   function imageIdentity(image, sourceDataUrl = "", backgroundImage = "") {
-    const source = image?.currentSrc
+    const source = sourceDataUrl
+      || image?.currentSrc
       || image?.getAttribute?.("src")
-      || sourceDataUrl
       || (backgroundImage !== "none" ? backgroundImage : "")
       || "";
     if (!source) return "";
@@ -35,12 +35,13 @@
   }
 
   function originalImageDataUrl(image, documentRef) {
-    if (!image || image.tagName !== "IMG") return "";
-    const currentSource = image.currentSrc || image.getAttribute?.("src") || "";
+    const tag = image?.tagName;
+    if (tag !== "IMG" && tag !== "CANVAS") return "";
+    const currentSource = tag === "IMG" ? image.currentSrc || image.getAttribute?.("src") : "";
     if (safeDataImage(currentSource)) return currentSource;
 
-    const width = Number(image.naturalWidth);
-    const height = Number(image.naturalHeight);
+    const width = Number(tag === "IMG" ? image.naturalWidth : image.width);
+    const height = Number(tag === "IMG" ? image.naturalHeight : image.height);
     if (!Number.isInteger(width)
       || !Number.isInteger(height)
       || width < 10
@@ -50,6 +51,10 @@
     }
 
     try {
+      if (tag === "CANVAS") {
+        const serialized = image.toDataURL("image/png");
+        return safeDataImage(serialized) ? serialized : "";
+      }
       const canvas = documentRef.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
@@ -62,6 +67,75 @@
       // Cross-origin images taint canvas; the caller must use screenshot fallback.
       return "";
     }
+  }
+
+  function queryAllDeep(root, selector) {
+    const matches = [];
+    const roots = [root];
+    while (roots.length) {
+      const scope = roots.pop();
+      if (!scope?.querySelectorAll) continue;
+      for (const element of scope.querySelectorAll(selector)) matches.push(element);
+      const hosts = Array.from(scope.querySelectorAll("*"));
+      if (scope.shadowRoot) hosts.unshift(scope);
+      for (const host of hosts.reverse()) {
+        if (host.shadowRoot) roots.push(host.shadowRoot);
+      }
+    }
+    return matches;
+  }
+
+  function inferInputHints({
+    type, inputMode, pattern, minLength, maxLength, metadata, labelText, localContext,
+  } = {}) {
+    const min = Number(minLength);
+    const max = Number(maxLength);
+    const validLength = (length) => Number.isInteger(length) && length >= 3 && length <= 6;
+    const regex = String(pattern || "").trim();
+    const atom = String.raw`(?:\\[dws]|\[\S+\]|[A-Za-z0-9.])`;
+    const fixedPattern = new RegExp(String.raw`^\^?(?:\((?:\?:)?${atom}\)|${atom})\{([3-6])\}\$?$`);
+    const patternLength = Number(fixedPattern.exec(regex)?.[1]);
+    const exactLengthText = /(^|[^\d])([3-6])\s*(?:[碼码位]|digits?\b|characters?\b)/i;
+    let statedLength = null;
+    for (const source of [labelText, metadata, localContext]) {
+      const text = String(source || "")
+        .replace(/(?:最多|至多|最少|至少|上限|up to|at most|at least|max(?:imum)?)\s*[:：]?\s*[3-6]/gi, "")
+        .replace(/\d+\s*[-–~～至到]\s*[3-6]/g, "");
+      const match = exactLengthText.exec(text);
+      if (match) {
+        statedLength = Number(match[2]);
+        break;
+      }
+    }
+    const exactLength = (min === max && validLength(min) ? min : null)
+      || patternLength || statedLength;
+    const expectedLength = exactLength || (validLength(max) ? max : null);
+
+    const digitsAtom = String.raw`(?:\\d|\[[0-9-]+\]|[0-9])`;
+    const lettersAtom = String.raw`(?:\[[A-Za-z-]+\]|[A-Za-z])`;
+    const isPatternFor = (characterAtom) => new RegExp(
+      String.raw`^\^?(?:\((?:\?:)?${characterAtom}\)|${characterAtom})(?:[+*?]|\{\d+(?:,\d*)?\})?\$?$`,
+    ).test(regex);
+    const text = [labelText, metadata, localContext].filter(Boolean).join(" ");
+    const mixedText = /英數|英数|字母與數字|字母和數字|字母与数字|alphanumeric/i.test(text)
+      || (/(?:[a-z]*letters?|alphabetic|字母|英文)/i.test(text) && /數字|数字|digits?|numeric/i.test(text));
+    const digitsText = /純[數数]字|[數数]字[驗验][證证][碼码]|\bdigits? only\b|\b\d+\s+digits?\b|\bnumeric\b/i.test(text);
+    const explicitDigits = /^(?:number)$/i.test(type || "") || /^(?:numeric)$/i.test(inputMode || "");
+    let charsetHint = "alphanumeric";
+    if (explicitDigits || isPatternFor(digitsAtom) || (!mixedText && digitsText)) {
+      charsetHint = "digits";
+    } else if (isPatternFor(lettersAtom) || (!mixedText && /純英文|英文字母|letters? only/i.test(text))) {
+      charsetHint = "letters";
+    }
+    const caseSensitive = /(?:區分大小寫|区分大小写|\bcase[- ]sensitive\b)/i.test(
+      text.replace(/不\s*(?:區分大小寫|区分大小写)|\bnot\s+case[- ]sensitive\b/gi, ""),
+    );
+    return {
+      expectedLength,
+      lengthMode: exactLength ? "exact" : expectedLength ? "max" : "unknown",
+      charsetHint,
+      caseSensitive,
+    };
   }
 
   function finiteCandidateValue(candidate, key, fallback) {
@@ -77,6 +151,7 @@
   }
 
   function scoreInputAssociation(candidate) {
+    if (candidate?.disabled || candidate?.readOnly) return Number.NEGATIVE_INFINITY;
     const metadata = String(candidate?.metadata || "");
     const labelText = String(candidate?.labelText || "");
     const localContext = String(candidate?.localContext || "");
@@ -141,6 +216,8 @@
   return {
     imageIdentity,
     originalImageDataUrl,
+    queryAllDeep,
+    inferInputHints,
     compareCandidates,
     rankCandidates,
     scoreInputAssociation,

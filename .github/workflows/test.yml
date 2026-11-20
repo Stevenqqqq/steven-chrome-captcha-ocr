@@ -29,9 +29,9 @@ jobs:
         run: python -B -m unittest discover -s tests -p "test*.py" -v
 
       - name: Extension tests
-        run: node --test tests/test_background.js tests/test_captcha_image.js tests/test_detect_helpers.js tests/test_feedback_helpers.js tests/test_popup_startup.js
+        run: node --test tests/test_background.js tests/test_browser_ocr.js tests/test_captcha_image.js tests/test_detect_helpers.js tests/test_feedback_helpers.js tests/test_floating_pill.js tests/test_picker.js tests/test_popup_startup.js tests/test_site_profiles.js
 
       - name: Syntax and service checks
         run: |
-          node --check extension/popup.js
+          node --check extension/background.js extension/browser_ocr.js extension/captcha_image.js extension/detect.js extension/detect_helpers.js extension/feedback_helpers.js extension/floating_pill.js extension/offscreen.js extension/picker.js extension/popup.js extension/popup_startup.js extension/site_profiles.js
           python -B ocr_server.py --check

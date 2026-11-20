@@ -43,7 +43,7 @@
     return Boolean(
       value
       && REPORT_ID_PATTERN.test(String(value.reportId ?? ""))
-      && ANSWER_PATTERN.test(String(value.answer ?? "")),
+      && (value.caseSensitive === true ? /^[0-9A-Za-z]{3,6}$/ : ANSWER_PATTERN).test(String(value.answer ?? "")),
     );
   }
 
@@ -51,11 +51,13 @@
     return Number.isInteger(value) && value >= 4;
   }
 
-  function shouldAutoFill(answerValue, expectedLength, lengthMatch) {
-    const answer = normalizeCorrectAnswer(answerValue);
-    if (!ANSWER_PATTERN.test(answer)) return false;
+  function shouldAutoFill(answerValue, expectedLength, lengthMatch, lengthMode = "exact", caseSensitive = false) {
+    const answer = caseSensitive ? String(answerValue ?? "").trim() : normalizeCorrectAnswer(answerValue);
+    if (!(caseSensitive ? /^[0-9A-Za-z]{3,6}$/ : ANSWER_PATTERN).test(answer)) return false;
+    const hasLength = Number.isInteger(expectedLength) && expectedLength >= 3 && expectedLength <= 6;
+    if (lengthMode === "max" && hasLength) return answer.length <= expectedLength;
     if (lengthMatch === false) return false;
-    if (Number.isInteger(expectedLength) && expectedLength >= 3 && expectedLength <= 6) {
+    if (hasLength && lengthMode !== "unknown") {
       return answer.length === expectedLength;
     }
     return true;

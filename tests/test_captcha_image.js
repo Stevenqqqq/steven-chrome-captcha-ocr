@@ -6,6 +6,8 @@ const {
   buildRecognizeUrl,
   decodeSafeDataImage,
   preferredCaptchaBlob,
+  rasterizeSvgCaptcha,
+  blobIdentity,
 } = require("../extension/captcha_image.js");
 
 
@@ -92,4 +94,32 @@ test("falls back to a screenshot when the page image is absent or unsafe", async
   assert.equal(absent.blob, screenshot);
   assert.equal(unsafe.blob, screenshot);
   assert.equal(fallbackCalls, 2);
+});
+
+test("appends supported recognition options and omits invalid ones", () => {
+  assert.equal(buildRecognizeUrl("http://ocr", {
+    expectedLength: 5, lengthMode: "max", charsetHint: "letters", caseSensitive: true,
+  }), "http://ocr/recognize?expectedLength=5&lengthMode=max&charsetHint=letters&caseSensitive=1");
+  assert.equal(buildRecognizeUrl("http://ocr", {
+    expectedLength: 9, lengthMode: "other", charsetHint: "digits", caseSensitive: "true",
+  }), "http://ocr/recognize?charsetHint=digits");
+  assert.equal(buildRecognizeUrl("http://ocr", "4"), "http://ocr/recognize?expectedLength=4");
+  assert.equal(buildRecognizeUrl("http://ocr", null), "http://ocr/recognize");
+  assert.equal(buildRecognizeUrl("http://ocr"), "http://ocr/recognize");
+});
+
+test("rejects SVG doctypes, oversize markup and dimensions before invoking browser APIs", async () => {
+  for (const [markup, size] of [
+    ["<!DOCTYPE svg><svg/>", { width: 80, height: 30 }],
+    ["x".repeat(500_001), { width: 80, height: 30 }],
+    ["<svg/>", { width: 100_000, height: 100_000 }],
+  ]) {
+    await assert.rejects(rasterizeSvgCaptcha(markup, size), /格式或尺寸無效/);
+  }
+});
+
+test("fallback image identity is stable for the same PNG bytes and changes with content", async () => {
+  const first = await blobIdentity(new Blob(["first"], { type: "image/png" }));
+  assert.equal(first, await blobIdentity(new Blob(["first"], { type: "image/png" })));
+  assert.notEqual(first, await blobIdentity(new Blob(["second"], { type: "image/png" })));
 });

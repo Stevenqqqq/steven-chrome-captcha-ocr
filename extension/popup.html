@@ -3,33 +3,88 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>驗證碼 OCR</title>
+    <title>Steven OCR</title>
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
-    <main>
-      <header>
-        <div>
-          <p class="eyebrow">STEVEN OCR</p>
-          <h1>驗證碼辨識</h1>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="reticle" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+              <path d="M2.5 5.5V3.5a1 1 0 0 1 1-1h2M10.5 2.5h2a1 1 0 0 1 1 1v2M13.5 10.5v2a1 1 0 0 1-1 1h-2M5.5 13.5h-2a1 1 0 0 1-1-1v-2"/>
+              <circle cx="8" cy="8" r="2"/>
+            </svg>
+          </div>
+          <div>
+            <h1>Steven OCR</h1>
+            <p class="subtitle">人工觸發 · 僅填入不送出</p>
+          </div>
         </div>
-        <span id="serviceState" class="service-state" aria-label="OCR 服務狀態"></span>
+        <button id="enginePill" class="engine-pill" type="button" title="點擊切換離線 ONNX / 本機 Python 引擎">
+          <span id="serviceState" class="service-state" aria-label="OCR 服務狀態"></span>
+          <span id="engineLabel">檢查中</span>
+        </button>
       </header>
 
-      <section class="result-panel" aria-live="polite">
-        <p id="statusText">正在檢查 OCR 服務...</p>
-        <strong id="answerText" hidden></strong>
-        <small id="detailText"></small>
+      <section id="siteBar" class="site-bar" aria-label="目前網域規則">
+        <span class="site-label">網域規則：<strong id="siteStatusText">自動偵測</strong></span>
+        <div class="site-bar-right">
+          <span id="siteRuleBadge" class="site-rule" hidden></span>
+          <button id="clearSiteRuleButton" class="text-btn" type="button" hidden title="清除此網域記憶規則">清除</button>
+        </div>
       </section>
 
-      <button id="recognizeButton" type="button" disabled>
-        <span class="scan-icon" aria-hidden="true"></span>
-        <span>辨識並填入</span>
-      </button>
+      <section id="heroCard" class="hero-card" aria-live="polite">
+        <div id="captureRow" class="capture-row" hidden>
+          <div class="thumb-frame">
+            <img id="captureThumb" alt="擷取到的圖片預覽">
+          </div>
+          <div class="meta-stats">
+            <div>信心度 <strong id="confidenceValue" class="conf-value">--</strong></div>
+            <div id="metaDetail" class="meta-sub"></div>
+          </div>
+        </div>
+
+        <p id="statusText" class="status-text">正在檢查 OCR 服務...</p>
+        <strong id="answerText" class="answer-fallback" hidden></strong>
+
+        <div id="charTiles" class="char-tiles" hidden aria-label="逐字辨識結果"></div>
+
+        <div id="candidatesRow" class="candidates-row" hidden>
+          <span class="cand-label">候選</span>
+          <div id="candidatesList" class="candidates-list"></div>
+        </div>
+
+        <small id="detailText" class="detail-text"></small>
+      </section>
+
+      <div class="primary-actions">
+        <button id="recognizeButton" class="btn-primary" type="button" disabled>
+          <span class="scan-icon" aria-hidden="true"></span>
+          <span>辨識並填入</span>
+          <span class="kbd">Ctrl+Shift+Y</span>
+        </button>
+        <button id="pickerButton" class="btn-secondary" type="button" title="手動點選目標圖片與輸入框並記住此網站">
+          點選目標
+        </button>
+      </div>
+
+      <section id="feedbackStrip" class="feedback-strip" hidden>
+        <span>辨識有誤或裁圖偏差？</span>
+        <button id="feedbackToggle" class="strip-toggle" type="button" aria-expanded="false">展開糾正 ▾</button>
+      </section>
 
       <section id="feedbackPanel" class="feedback-panel" hidden>
-        <p>若辨識錯誤或答案長度不符，輸入你人工確認的正確答案：</p>
-        <p class="previous-answer">OCR 答案：<strong id="feedbackPrediction"></strong></p>
+        <div class="feedback-head">
+          <div class="feedback-copy">
+            <p class="feedback-note">輸入你人工確認的正確答案以保存錯題：</p>
+            <p class="previous-answer">OCR 答案：<strong id="feedbackPrediction"></strong></p>
+          </div>
+          <div id="feedbackThumbWrap" class="thumb-frame thumb-sm" hidden>
+            <img id="feedbackThumb" alt="錯題圖片對照">
+          </div>
+        </div>
         <label for="correctAnswerInput">正確答案</label>
         <input
           id="correctAnswerInput"
@@ -40,14 +95,18 @@
           autocomplete="off"
           autocapitalize="characters"
           spellcheck="false"
-          placeholder="例如 10662"
+          placeholder="例如 A70K"
         >
         <div class="feedback-actions">
-          <button id="reportButton" type="button">保存錯題</button>
-          <button id="nextButton" class="secondary" type="button">答案正確／下一題</button>
+          <button id="reportButton" class="btn-primary btn-sm" type="button">保存錯題</button>
+          <button id="nextButton" class="btn-secondary btn-sm" type="button">答案正確／下一題</button>
         </div>
+        <button id="exportOfflineButton" class="btn-secondary btn-sm export-btn" type="button" hidden>
+          匯出離線錯題 (JSON)
+        </button>
       </section>
     </main>
+    <script src="site_profiles.js"></script>
     <script src="captcha_image.js"></script>
     <script src="feedback_helpers.js"></script>
     <script src="popup_startup.js"></script>

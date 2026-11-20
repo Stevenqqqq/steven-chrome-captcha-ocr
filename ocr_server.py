@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -26,7 +27,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_FEEDBACK_BYTES = 8 * 1024
-API_VERSION = 6
+API_VERSION = 7
 ACTIVE_LEARNING_SOURCES = {"toolweb_practice"}
 VERIFIED_DATA_METHODS = {"manual_confirmed", "site_accepted"}
 
@@ -35,9 +36,10 @@ class OcrError(RuntimeError):
     pass
 
 
-def normalize_answer(value: object) -> str:
+def normalize_answer(value: object, *, case_sensitive: bool = False) -> str:
     text = re.sub(r"\s+", "", str(value or ""))
-    return re.sub(r"[^0-9A-Za-z]", "", text).upper()
+    cleaned = re.sub(r"[^0-9A-Za-z]", "", text)
+    return cleaned if case_sensitive else cleaned.upper()
 
 
 def answer_is_plausible(answer: str) -> bool:
@@ -51,6 +53,95 @@ def parse_expected_length(value: object) -> int | None:
     if not re.fullmatch(r"[3-6]", text):
         raise OcrError("expectedLength must be an integer from 3 to 6")
     return int(text)
+
+
+def parse_length_mode(value: object) -> str:
+    if value is None or value == "":
+        return "exact"
+    mode = str(value).strip().lower()
+    if mode not in {"exact", "max", "unknown"}:
+        raise OcrError("lengthMode must be exact, max, or unknown")
+    return mode
+
+
+def parse_charset_hint(value: object) -> str:
+    if value is None or value == "":
+        return "alphanumeric"
+    hint = str(value).strip().lower()
+    if hint not in {"alphanumeric", "digits", "letters"}:
+        raise OcrError("charsetHint must be alphanumeric, digits, or letters")
+    return hint
+
+
+def parse_case_sensitive(value: object) -> bool:
+    if value is None or value == "":
+        return False
+    flag = str(value).strip().lower()
+    if flag in {"1", "true"}:
+        return True
+    if flag in {"0", "false"}:
+        return False
+    raise OcrError("caseSensitive must be 0, 1, false, or true")
+
+
+def _matches_charset_hint(answer: str, charset_hint: str) -> bool:
+    if charset_hint == "digits":
+        return answer.isdigit()
+    if charset_hint == "letters":
+        return answer.isalpha()
+    return True
+
+
+def _matches_length_constraint(answer: str, expected_length: int | None, length_mode: str) -> bool:
+    if expected_length is None or length_mode == "unknown":
+        return True
+    if length_mode == "max":
+        return 3 <= len(answer) <= expected_length
+    return len(answer) == expected_length
+
+
+def _build_char_confidences(
+    answer: str,
+    predictions: Iterable[dict],
+    candidates: list[dict],
+    *,
+    case_sensitive: bool = False,
+) -> list[dict]:
+    if not answer:
+        return []
+    same_length = [
+        normalize_answer(item.get("answer"), case_sensitive=case_sensitive)
+        for item in predictions
+        if len(normalize_answer(item.get("answer"), case_sensitive=case_sensitive)) == len(answer)
+    ]
+    runner_up = next(
+        (
+            str(item.get("answer") or "")
+            for item in candidates
+            if str(item.get("answer") or "") != answer
+            and len(str(item.get("answer") or "")) == len(answer)
+        ),
+        "",
+    )
+    items = []
+    for index, character in enumerate(answer):
+        position_votes = Counter(pred[index] for pred in same_length)
+        total = sum(position_votes.values())
+        if total > 0:
+            char_conf = position_votes.get(character, 0) / total
+        else:
+            char_conf = 1.0
+        alternatives = [
+            alt for alt, _ in position_votes.most_common(3) if alt != character
+        ]
+        if runner_up and runner_up[index] != character and runner_up[index] not in alternatives:
+            alternatives.insert(0, runner_up[index])
+        items.append({
+            "char": character,
+            "confidence": round(float(char_conf), 4),
+            "alternatives": alternatives[:2],
+        })
+    return items
 
 
 def parse_correct_answer(value: object) -> str:
@@ -89,28 +180,57 @@ def parse_site_acceptance_evidence(value: object) -> dict:
 
 
 def origin_is_allowed(origin: str) -> bool:
-    return not origin or origin.startswith("chrome-extension://")
+    allowed = os.environ.get("OCR_ALLOWED_EXTENSION_IDS")
+    if not origin or allowed is None:
+        return not origin or origin.startswith("chrome-extension://")
+    return any(
+        origin == f"chrome-extension://{item.strip()}"
+        for item in allowed.split(",") if item.strip()
+    )
 
 
-def choose_ensemble(predictions: Iterable[dict], expected_length: int | None = None) -> dict:
+def choose_ensemble(
+    predictions: Iterable[dict],
+    expected_length: int | None = None,
+    *,
+    length_mode: str = "exact",
+    charset_hint: str = "alphanumeric",
+    case_sensitive: bool = False,
+) -> dict:
     usable = [
         item
         for item in predictions
-        if answer_is_plausible(normalize_answer(item.get("answer")))
+        if answer_is_plausible(normalize_answer(item.get("answer"), case_sensitive=case_sensitive))
     ]
     if not usable:
         raise OcrError("三組 OCR 都沒有產生可信的 3 至 6 位英數答案")
 
     length_match = None
-    if expected_length is not None:
+    if expected_length is not None and length_mode != "unknown":
         length_matches = [
             item
             for item in usable
-            if len(normalize_answer(item.get("answer"))) == expected_length
+            if _matches_length_constraint(
+                normalize_answer(item.get("answer"), case_sensitive=case_sensitive),
+                expected_length,
+                length_mode,
+            )
         ]
         length_match = bool(length_matches)
         if length_matches:
             usable = length_matches
+
+    if charset_hint != "alphanumeric":
+        charset_matches = [
+            item
+            for item in usable
+            if _matches_charset_hint(
+                normalize_answer(item.get("answer"), case_sensitive=case_sensitive),
+                charset_hint,
+            )
+        ]
+        if charset_matches:
+            usable = charset_matches
 
     solver_support = defaultdict(set)
     total_support = Counter()
@@ -119,7 +239,7 @@ def choose_ensemble(predictions: Iterable[dict], expected_length: int | None = N
     first_seen = {}
 
     for index, item in enumerate(usable):
-        answer = normalize_answer(item.get("answer"))
+        answer = normalize_answer(item.get("answer"), case_sensitive=case_sensitive)
         solver = str(item.get("solver") or "unknown")
         variant = str(item.get("variant") or "")
         solver_support[answer].add(solver)
@@ -160,6 +280,7 @@ def choose_ensemble(predictions: Iterable[dict], expected_length: int | None = N
             answer = total_leader
             ranked = [answer, *[item for item in ranked if item != answer]]
             selection_strategy = "strong_variant_consensus_override"
+    total_votes_sum = max(1, sum(total_support.values()))
     candidates = [
         {
             "answer": item,
@@ -167,15 +288,36 @@ def choose_ensemble(predictions: Iterable[dict], expected_length: int | None = N
             "total_votes": total_support[item],
             "preferred_votes": preferred_support[item],
             "raw_votes": raw_support[item],
+            "confidence": round(total_support[item] / total_votes_sum, 4),
         }
         for item in ranked[:5]
     ]
+    top_candidates = [
+        {
+            "answer": item["answer"],
+            "confidence": item["confidence"],
+            "solver_votes": item["solver_votes"],
+            "total_votes": item["total_votes"],
+        }
+        for item in candidates[:3]
+    ]
     return {
         "answer": answer,
+        "confidence": round(total_support[answer] / total_votes_sum, 4),
+        "char_confidences": _build_char_confidences(
+            answer,
+            usable,
+            candidates,
+            case_sensitive=case_sensitive,
+        ),
         "solver_votes": len(solver_support[answer]),
         "total_votes": total_support[answer],
         "candidates": candidates,
+        "top_candidates": top_candidates,
         "expected_length": expected_length,
+        "length_mode": length_mode,
+        "charset_hint": charset_hint,
+        "case_sensitive": case_sensitive,
         "length_match": length_match,
         "selection_strategy": selection_strategy,
     }
@@ -389,6 +531,8 @@ class FeedbackStore:
         self.ttl_seconds = ttl_seconds
         self.pending = OrderedDict()
         self.lock = threading.Lock()
+        self._sha_index: dict[str, Path] = {}
+        self._sha_index_ready = False
 
     @staticmethod
     def _safe_result(result: dict) -> dict:
@@ -450,28 +594,45 @@ class FeedbackStore:
                 self.pending.popitem(last=False)
         return report_id
 
-    def _find_existing_image(self, image_sha256: str) -> tuple[Path, dict] | None:
-        feedback_dir = self.root / "feedback"
+    def _read_index_record(self, metadata_path: Path) -> tuple[str, dict] | None:
         samples_dir = self.root / "samples"
-        if not feedback_dir.is_dir():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not isinstance(metadata, dict):
+                return None
+            image_path = (samples_dir / metadata["image_file"]).resolve()
+            image_path.relative_to(samples_dir.resolve())
+            if not image_path.is_file():
+                return None
+            digest = str(metadata.get("image_sha256") or "")
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
+            return digest, metadata
+        except (OSError, KeyError, TypeError, ValueError, RuntimeError):
             return None
 
-        for metadata_path in sorted(feedback_dir.glob("*.json")):
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-                stored_hash = str(metadata.get("image_sha256") or "")
-                if not re.fullmatch(r"[0-9a-f]{64}", stored_hash):
-                    image_file = str(metadata.get("image_file") or "")
-                    image_path = (samples_dir / image_file).resolve()
-                    image_path.relative_to(samples_dir.resolve())
-                    if not image_path.is_file():
-                        continue
-                    stored_hash = hashlib.sha256(image_path.read_bytes()).hexdigest()
-                if secrets.compare_digest(stored_hash, image_sha256):
-                    return metadata_path, metadata
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                continue
-        return None
+    def _find_existing_image(self, image_sha256: str) -> tuple[Path, dict] | None:
+        # confirm holds self.lock across lookup and publication of new records.
+        if self._sha_index_ready:
+            path = self._sha_index.get(image_sha256)
+            if path is None:
+                return None
+            record = self._read_index_record(path)
+            if record and record[0] == image_sha256:
+                return path, record[1]
+
+        index: dict[str, Path] = {}
+        match = None
+        for path in sorted((self.root / "feedback").glob("*.json")):
+            record = self._read_index_record(path)
+            if record and record[0] not in index:
+                digest, metadata = record
+                index[digest] = path
+                if digest == image_sha256:
+                    match = path, metadata
+        self._sha_index = index
+        self._sha_index_ready = True
+        return match
 
     @staticmethod
     def _write_metadata_atomic(metadata_path: Path, metadata: dict):
@@ -589,6 +750,7 @@ class FeedbackStore:
                 )
                 os.replace(image_tmp, image_path)
                 os.replace(metadata_tmp, metadata_path)
+                self._sha_index[image_sha256] = metadata_path
             except Exception as error:
                 image_tmp.unlink(missing_ok=True)
                 metadata_tmp.unlink(missing_ok=True)
@@ -974,22 +1136,48 @@ class OcrEngine:
     def names(self):
         return [name for name, _ in self.solvers]
 
-    def recognize(self, image_bytes: bytes, expected_length: int | None = None) -> dict:
+    def recognize(
+        self,
+        image_bytes: bytes,
+        expected_length: int | None = None,
+        *,
+        length_mode: str = "exact",
+        charset_hint: str = "alphanumeric",
+        case_sensitive: bool = False,
+    ) -> dict:
+        started = time.perf_counter()
         variants = list(image_variants(image_bytes))
         predictions = []
         failures = []
         probability_variants = []
+        fusion_eligible = (
+            self.fusion is not None
+            and not case_sensitive
+            and charset_hint != "digits"
+            and (
+                expected_length == 4
+                or expected_length is None
+                or length_mode == "unknown"
+                or (length_mode == "max" and expected_length >= 4)
+            )
+        )
         with self.lock:
             self.load()
             for solver_name, solver in self.solvers:
                 for variant_name, variant_bytes in variants:
                     try:
-                        if solver_name == "official" and self.fusion is not None and expected_length == 4:
+                        if solver_name == "official" and fusion_eligible:
                             probability = solver.classification(variant_bytes, probability=True)
                             probability_variants.append((variant_name, probability))
-                            answer = normalize_answer(probability.get("text"))
+                            answer = normalize_answer(
+                                probability.get("text"),
+                                case_sensitive=case_sensitive,
+                            )
                         else:
-                            answer = normalize_answer(solver.classification(variant_bytes))
+                            answer = normalize_answer(
+                                solver.classification(variant_bytes),
+                                case_sensitive=case_sensitive,
+                            )
                     except Exception as error:
                         failures.append(f"{solver_name}/{variant_name}: {error}")
                         continue
@@ -1003,11 +1191,22 @@ class OcrEngine:
                             prediction["preferred"] = True
                         predictions.append(prediction)
 
-        result = choose_ensemble(predictions, expected_length=expected_length)
-        if self.fusion is not None and expected_length == 4:
+        result = choose_ensemble(
+            predictions,
+            expected_length=expected_length,
+            length_mode=length_mode,
+            charset_hint=charset_hint,
+            case_sensitive=case_sensitive,
+        )
+        baseline_answer = normalize_answer(result.get("answer"), case_sensitive=case_sensitive)
+        should_run_fusion = fusion_eligible and (
+            expected_length == 4
+            or (len(baseline_answer) == 4 and baseline_answer.isalpha())
+        )
+        if should_run_fusion:
             try:
                 fused = self.fusion.recognize(
-                    image_bytes, normalize_answer(result.get("answer")), probability_variants
+                    image_bytes, baseline_answer, probability_variants
                 )
                 if fused is not None:
                     result.update(fused)
@@ -1016,6 +1215,27 @@ class OcrEngine:
                         or fused.get("fusion_model")
                         or "fusion_v4_v6_v7"
                     )
+                    if fused.get("fused_top_probability") is not None:
+                        result["confidence"] = round(float(fused["fused_top_probability"]), 4)
+                    final_answer = str(result.get("answer") or baseline_answer)
+                    if final_answer != baseline_answer:
+                        top_list = [
+                            item for item in result.get("top_candidates") or []
+                            if item.get("answer") != final_answer
+                        ]
+                        top_list.insert(0, {
+                            "answer": final_answer,
+                            "confidence": result.get("confidence", 0.0),
+                            "solver_votes": result.get("solver_votes", 0),
+                            "total_votes": result.get("total_votes", 0),
+                        })
+                        result["top_candidates"] = top_list[:3]
+                        result["char_confidences"] = _build_char_confidences(
+                            final_answer,
+                            predictions,
+                            result.get("candidates") or [],
+                            case_sensitive=case_sensitive,
+                        )
             except Exception as error:
                 failures.append(f"fusion_v4_v6_v7: {error}")
         result["predictions"] = predictions
@@ -1024,6 +1244,7 @@ class OcrEngine:
             image_bytes,
         )
         result["solver_count"] = len(self.solvers)
+        result["latency_ms"] = round((time.perf_counter() - started) * 1000.0, 1)
         if failures:
             result["warnings"] = failures[:3]
         return result
@@ -1072,12 +1293,22 @@ class OcrRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-OCR-Token")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
-    def do_GET(self):
+    def _authorized(self):
         if not self._check_origin():
+            return False
+        token = os.environ.get("OCR_API_TOKEN")
+        supplied = self.headers.get_all("X-OCR-Token") or []
+        if token and (len(supplied) != 1 or not secrets.compare_digest(supplied[0].encode(), token.encode())):
+            self._send_json(403, {"ok": False, "error": "無效的 OCR API Token"})
+            return False
+        return True
+
+    def do_GET(self):
+        if not self._authorized():
             return
         if self.path != "/health":
             self._send_json(404, {"ok": False, "error": "找不到 API"})
@@ -1089,7 +1320,7 @@ class OcrRequestHandler(BaseHTTPRequestHandler):
             self._send_json(503, {"ok": False, "error": str(error)})
 
     def do_POST(self):
-        if not self._check_origin():
+        if not self._authorized():
             return
         request_url = urlsplit(self.path)
         if request_url.path == "/feedback":
@@ -1110,11 +1341,28 @@ class OcrRequestHandler(BaseHTTPRequestHandler):
             return
         image_bytes = self.rfile.read(content_length)
         try:
-            length_values = parse_qs(request_url.query, keep_blank_values=True).get("expectedLength", [])
-            if len(length_values) > 1:
-                raise OcrError("expectedLength must be provided at most once")
-            expected_length = parse_expected_length(length_values[0] if length_values else None)
-            result = ENGINE.recognize(image_bytes, expected_length=expected_length)
+            query_params = parse_qs(request_url.query, keep_blank_values=True)
+            def _single_param(name: str):
+                values = query_params.get(name, [])
+                if len(values) > 1:
+                    raise OcrError(f"{name} must be provided at most once")
+                return values[0] if values else None
+
+            expected_length = parse_expected_length(_single_param("expectedLength"))
+            length_mode = parse_length_mode(_single_param("lengthMode"))
+            charset_hint = parse_charset_hint(_single_param("charsetHint"))
+            case_sensitive = parse_case_sensitive(_single_param("caseSensitive"))
+
+            recognize_kwargs = {"expected_length": expected_length}
+            recognize_params = inspect.signature(ENGINE.recognize).parameters
+            if "length_mode" in recognize_params:
+                recognize_kwargs["length_mode"] = length_mode
+            if "charset_hint" in recognize_params:
+                recognize_kwargs["charset_hint"] = charset_hint
+            if "case_sensitive" in recognize_params:
+                recognize_kwargs["case_sensitive"] = case_sensitive
+
+            result = ENGINE.recognize(image_bytes, **recognize_kwargs)
             result["report_id"] = FEEDBACK_STORE.remember(
                 image_bytes,
                 expected_length=expected_length,
@@ -1200,10 +1448,11 @@ class OcrHttpServer(ThreadingHTTPServer):
 def matching_service_is_running(host=DEFAULT_HOST, port=DEFAULT_PORT, timeout=1.0) -> bool:
     probe_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     try:
-        with urllib.request.urlopen(
-            f"http://{probe_host}:{port}/health",
-            timeout=timeout,
-        ) as response:
+        request = urllib.request.Request(f"http://{probe_host}:{port}/health")
+        token = os.environ.get("OCR_API_TOKEN")
+        if token:
+            request.add_unredirected_header("X-OCR-Token", token)
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             if response.status != 200:
                 return False
             payload = json.loads(response.read(MAX_FEEDBACK_BYTES).decode("utf-8"))

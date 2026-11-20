@@ -927,11 +927,26 @@
     }
 
     async function dispose() {
+      const sessions = [
+        state.official?.session,
+        state.fusion?.directSession,
+        state.fusion?.cropSession,
+        state.universal?.session,
+      ].filter(Boolean);
       state.ready = false;
       state.models = [];
       state.official = null;
       state.fusion = null;
       state.universal = null;
+      for (const session of sessions) {
+        if (typeof session.release === "function") {
+          try {
+            await session.release();
+          } catch {
+            // Ignore release errors during shutdown.
+          }
+        }
+      }
     }
 
     return { warmUp, getStatus, recognizeRgba, dispose };

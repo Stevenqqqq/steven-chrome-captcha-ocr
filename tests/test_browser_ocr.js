@@ -219,3 +219,54 @@ test("median luminance and dark_primary enhancement classify dark vs light corre
   assert.equal(unit.height, 64);
   assert.ok(unit.tensor[0] > 0.8 && unit.tensor[0] <= 1.0);
 });
+
+test("offscreen controller releases sessions and closes after idle timeout without interrupting in-flight work", async () => {
+  const { createOffscreenController } = require("../extension/offscreen.js");
+  let disposed = 0;
+  let closed = 0;
+  let scheduledFn = null;
+  let scheduledMs = null;
+  let cleared = 0;
+  let releasePending;
+
+  const controller = createOffscreenController({
+    runtime: {
+      async warmUp() { return { ok: true, ready: true, models: ["official"] }; },
+      async recognizeRgba() {
+        await new Promise((resolve) => { releasePending = resolve; });
+        return { ok: true, answer: "A7KP" };
+      },
+      async dispose() { disposed += 1; },
+    },
+    decodeDataUrl: async () => ({ rgba: new Uint8Array(16), width: 2, height: 2 }),
+    idleMs: 600_000,
+    onClose: () => { closed += 1; },
+    setTimer: (fn, ms) => { scheduledFn = fn; scheduledMs = ms; return 42; },
+    clearTimer: () => { cleared += 1; scheduledFn = null; },
+  });
+
+  const health = await controller.handleMessage({ type: "OCR_HEALTH", requestId: "r1" });
+  assert.equal(health.ok, true);
+  assert.equal(scheduledMs, 600_000);
+  assert.equal(controller.getState().hasIdleTimer, true);
+
+  // Start in-flight recognition: timer must be cancelled while busy.
+  const recogPromise = controller.handleMessage({ type: "OCR_RECOGNIZE", imageDataUrl: "data:image/png;base64,", requestId: "r2" });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(controller.getState().inFlight, 1);
+  assert.equal(controller.getState().hasIdleTimer, false);
+  assert.ok(cleared >= 1);
+
+  releasePending();
+  const recog = await recogPromise;
+  assert.equal(recog.answer, "A7KP");
+  assert.equal(controller.getState().inFlight, 0);
+  assert.equal(controller.getState().hasIdleTimer, true);
+
+  // Fire the 10-minute idle timer: disposes ONNX runtime and closes offscreen document.
+  await scheduledFn();
+  await new Promise((r) => setImmediate(r));
+  assert.equal(disposed, 1);
+  assert.equal(closed, 1);
+  assert.equal(controller.getState().closing, true);
+});

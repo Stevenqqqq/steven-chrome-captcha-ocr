@@ -28,37 +28,40 @@
 ## 系統需求
 
 - Windows 10／11 64-bit
-- Python 3.10 64-bit
 - Chrome 127 或更新版本
-- 約 1 GB 可用空間供 Python 套件使用
+- 約 1 GB 可用空間
 
-## 第一次安裝
+## 一般使用者：下載 ZIP 或使用純瀏覽器離線模式
 
-### 模式 A：純瀏覽器離線 ONNX（免開 Python 黑窗，v2.0 新增）
+### 方式一：純瀏覽器離線 ONNX（免開 Python 黑窗，v2.0 新增）
 
-1. 執行一次資產準備腳本，拉取鎖定版本 `onnxruntime-web` 與同步本機模型清單至擴充功能（相關檔案預設不提交到 Git）：
+1. 執行一次資產準備腳本，拉取鎖定版本 `onnxruntime-web` 與同步 MIT 授權的 `official`（`common_old.onnx`）及本機模型清單至擴充功能（相關檔案預設不提交到 Git）：
    ```powershell
    py -3.10 scripts\prepare_browser_bundle.py
    ```
 2. 雙擊 `開啟Chrome擴充功能頁.bat`，開啟右上角「開發人員模式」→ 點「載入未封裝項目」→ 選擇 `extension` 資料夾。
-3. 將「Steven 驗證碼 OCR 助手」固定在工具列；不啟動 Python 即可於 Chrome MV3 Offscreen Document 本地執行 ONNX 離線推論。
+3. 將「Steven 驗證碼 OCR 助手」固定在工具列；不啟動 Python 或 EXE 即可於 Chrome MV3 Offscreen Document 本地執行 ONNX 離線推論。
 
-### 模式 B：本機 Python 服務（完整多模型投票與訓練回饋）
+### 方式二：Windows 發布版 ZIP（本機 EXE 服務）
 
-1. 雙擊 `安裝依賴.bat`。
-2. 雙擊 `啟動OCR服務.bat`，將終端保持開啟或最小化；關閉終端就會停止 OCR 服務。
-3. 雙擊 `開啟Chrome擴充功能頁.bat`，開啟「開發人員模式」→「載入未封裝項目」→ 選擇 `extension` 資料夾。
-4. 擴充功能右上角膠囊可一鍵切換 **離線 ONNX ↔ 本機 Python**；離線模式下糾正的錯題可暫存於本機並匯出 JSON。
+1. 到 GitHub **Releases** 下載 `StevenCaptchaOCR-Windows-x64-v版本.zip`。
+2. 將 ZIP **完整解壓縮**到桌面、文件或 D 槽的一般資料夾；不要直接在 ZIP 內執行，也不要放到 `Program Files`。
+3. 雙擊 `StevenCaptchaOCR.exe`，將終端保持開啟或最小化；關閉終端就會停止 OCR 服務。
+4. 雙擊 `開啟Chrome擴充功能頁.bat`，或手動開啟 `chrome://extensions`。
+5. 開啟右上角「開發人員模式」，點「載入未封裝項目」，選擇解壓後的 `extension` 資料夾。
+6. 將「Steven 驗證碼 OCR 助手」固定在 Chrome 工具列；彈窗右上角膠囊可一鍵切換 **離線 ONNX ↔ 本機 Python**。
 
-安裝程式會在專案內建立 `.venv`，不會把依賴直接裝進全域 Python。若要重建環境，可先關閉 OCR 服務，再刪除 `.venv` 並重新執行安裝程式。
+一般使用者不需要安裝 Python。發布包內的 `_internal` 是 EXE 必要檔案，請勿只把 EXE 單獨移走。Windows 對未簽章的新 EXE 可能顯示 SmartScreen 警告；請只從本專案的 GitHub Release 下載，並用同頁的 SHA-256 檔核對下載內容。
 
-GitHub 發布版預設使用 `ddddocr` 套件內建的 `official` 模型，因此不需要另外下載 ONNX。若你自行擁有可合法散布的 custom ONNX，可依 [models/README.md](models/README.md) 放入本機；custom 模型不是必要條件，也不會跟著 repository 上傳。
+辨識錯題會寫在解壓目錄內的 `training/samples/` 與 `training/feedback/`，不會寫進 PyInstaller 暫存目錄（離線模式糾正的錯題則暫存於本機並可一鍵匯出 JSON）。
+
+GitHub 發布版已包含 `official` 與 `fusion_v7` 模型，不需要另外下載 ONNX。選用的 custom ONNX 僅供從原始碼執行的開發流程使用，不會放進發布 ZIP。
 
 ## 使用
 
-1. 若使用本機 Python 模式，先啟動 `啟動OCR服務.bat`；若已準備離線 ONNX，可直接免開終端使用。
+1. 若使用本機服務模式，發布版先啟動 `StevenCaptchaOCR.exe`，開發版啟動 `啟動OCR服務.bat`；若已準備離線 ONNX，可直接免開終端使用。
 2. 開啟含有可見驗證碼與輸入框的網站（支援一般 DOM、open Shadow DOM、同源 iframe、`<canvas>`、inline `<svg>` 與 `input[type="number"]`）。
-3. **快捷鍵流程**：按 `Ctrl+Shift+Y` 辨識並填入後，頁面輸入框旁會浮現**不搶焦點的輕量浮動小條**（3.5 秒自動淡出、滑鼠懸停暫停），可直接按 `Enter` 送出或點一下切換 Top-2/3 候選。
+3. **快捷鍵流程**：按 `Ctrl+Shift+Y` 辨識並填入後，頁面輸入框旁會浮現**不搶焦點的輕量浮動小條**（3.5 秒自動淡出、滑鼠懸停暫停），可直接按 `Enter` 送出或點一下切換 Top-2/3 候選。若 OCR 字元數與網頁要求不同，擴充功能會拒絕自動填入並保留該題供人工回報。
 4. **工具列彈窗 v2.0**：點擊擴充功能圖示可檢視**擷取縮圖預覽、逐字信心格、Top-3 候選（支援鍵盤 `1/2/3` 快切）**與收合式錯題糾正抽屜。
 5. **手動點選綁定（Element Picker）**：遇到特殊版面抓不到時，點彈窗「點選目標」依序點選圖片與輸入框，即可記住該網域規則（Site Profile）與字數／字元集提示。
 
@@ -141,6 +144,8 @@ OCR 圖片只傳到本機 `http://127.0.0.1:8765`，服務不接受一般網站�
 
 ## 開發與測試
 
+原有 `.bat + Python` 流程保留給開發者。先安裝 Python 3.10 64-bit，再雙擊 `安裝依賴.bat`；它會在專案內建立 `.venv`，不會把依賴直接裝進全域 Python。啟動服務仍可使用 `啟動OCR服務.bat`。
+
 雙擊 `執行測試.bat`，或手動執行：
 
 ```powershell
@@ -149,5 +154,14 @@ node --test tests\test_background.js tests\test_captcha_image.js tests\test_dete
 node --check extension\popup.js
 py -3.10 -B ocr_server.py --check
 ```
+
+### 建立 Windows 發布包
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
+powershell -ExecutionPolicy Bypass -File scripts\build_windows_release.ps1 -PythonExecutable .\.venv\Scripts\python.exe
+```
+
+腳本會先跑 Python／Node 測試，再建立 `dist/release/` 內的 ZIP 與 SHA-256。推送與擴充功能版本相同的 `v*` tag（例如 `v1.8.2`）時，GitHub Actions 會在 Windows runner 重建、測試並附加 ZIP 到 GitHub Release；也可從 Actions 手動執行只取得 artifact。
 
 授權：本專案原始碼採 [MIT License](LICENSE)。第三方套件與模型請見 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

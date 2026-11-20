@@ -16,6 +16,30 @@ sys.path.insert(0, str(ROOT))
 import ocr_server
 
 
+class RuntimePathTests(unittest.TestCase):
+    def test_source_mode_keeps_resources_and_training_beside_script(self):
+        bundle_root, app_root = ocr_server.resolve_runtime_roots(
+            module_file=Path("C:/project/ocr_server.py"),
+            executable=Path("C:/Python/python.exe"),
+            frozen=False,
+        )
+
+        self.assertEqual(bundle_root, Path("C:/project"))
+        self.assertEqual(app_root, Path("C:/project"))
+
+    def test_frozen_mode_writes_beside_executable_not_bundle_directory(self):
+        bundle_root, app_root = ocr_server.resolve_runtime_roots(
+            module_file=Path("C:/release/_internal/ocr_server.py"),
+            executable=Path("C:/release/StevenCaptchaOCR.exe"),
+            frozen=True,
+        )
+
+        self.assertEqual(bundle_root, Path("C:/release/_internal"))
+        self.assertEqual(app_root, Path("C:/release"))
+        self.assertEqual(bundle_root / "models", Path("C:/release/_internal/models"))
+        self.assertEqual(app_root / "training", Path("C:/release/training"))
+
+
 class OcrEngineLoadingTests(unittest.TestCase):
     class FakeDdddOcr:
         def __init__(self, **kwargs):

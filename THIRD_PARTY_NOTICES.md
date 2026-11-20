@@ -8,7 +8,23 @@ This repository's source code is licensed under the MIT License. Third-party com
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) — MIT License.
 - [Pillow](https://github.com/python-pillow/Pillow) — HPND License.
 
-The exact runtime versions are pinned in `requirements.txt`.
+The direct runtime versions are pinned in `requirements.txt`. Their Windows wheels also bring in transitive runtime components, including:
+
+- NumPy — BSD-3-Clause License.
+- OpenCV Python — Apache License 2.0.
+- coloredlogs and humanfriendly — MIT License.
+- FlatBuffers — Apache License 2.0.
+- packaging — Apache-2.0 OR BSD-2-Clause.
+- Protocol Buffers — BSD-3-Clause License.
+- SymPy — BSD License.
+- charset-normalizer — MIT License.
+
+## Build tooling
+
+- [PyInstaller](https://pyinstaller.org/) — GPL-2.0-or-later with the PyInstaller bootloader exception.
+- PyInstaller Hooks Contrib — Apache License 2.0.
+
+Build-only tools are pinned in `requirements-build.txt`. Each dependency retains its own copyright and license terms; its upstream project and installed package metadata contain the complete license text.
 
 ## Optional custom models
 

@@ -466,6 +466,35 @@ test("mountMobileCaptchaUi detects CAPTCHA pair, recognizes on tap, fills native
   assert.equal(doc.getElementById(mobile.HOST_ID), null);
 });
 
+test("computePillPosition avoids overlapping the CAPTCHA image and filters digit homoglyph swaps", () => {
+  const viewport = { width: 390, height: 844 };
+  const pillSize = { width: 220, height: 36 };
+  const inputRect = { left: 24, top: 360, right: 366, bottom: 404, width: 342, height: 44 };
+
+  // When image is beside/unrelated, places below input as usual.
+  const nonOverlappingImage = { left: 24, top: 300, right: 140, bottom: 340, width: 116, height: 40 };
+  assert.deepEqual(
+    mobile.computePillPosition(inputRect, viewport, pillSize, nonOverlappingImage),
+    { left: 24, top: 410 },
+  );
+
+  // When image sits directly beneath the input (like has.nlma.gov.tw), moves above-right of input.
+  const imageBelowInput = { left: 24, top: 412, right: 174, bottom: 462, width: 150, height: 50 };
+  const pos = mobile.computePillPosition(inputRect, viewport, pillSize, imageBelowInput);
+  assert.ok(pos.top < inputRect.top, `Expected pill above input (top=${pos.top} < ${inputRect.top})`);
+  assert.equal(pos.left, inputRect.right - pillSize.width);
+
+  // Homoglyph filtering for pure-digit answers: drops 7O7694 when 707694 is active, keeps 107694.
+  const swaps = mobile.buildSwapCandidates("707694", [
+    { answer: "707694" },
+    { answer: "7O7694" },
+    { answer: "107694" },
+    { answer: "1O7694" },
+    { answer: "707699" },
+  ]);
+  assert.deepEqual(swaps.map((s) => s.answer), ["107694", "707699"]);
+});
+
 test("built mobile/steven_captcha_ocr.user.js contains valid userscript metadata and embedded assets", () => {
   const builtPath = path.resolve(__dirname, "..", "mobile", "steven_captcha_ocr.user.js");
   assert.equal(existsSync(builtPath), true, "mobile/steven_captcha_ocr.user.js should exist");

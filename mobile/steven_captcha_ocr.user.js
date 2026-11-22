@@ -2149,7 +2149,33 @@
     };
   }
 
-  function computePillPosition(inputRect, viewport, pillSize) {
+  function expandRect(rect, pad) {
+    return {
+      left: rect.left - pad,
+      top: rect.top - pad,
+      right: (rect.right ?? rect.left + rect.width) + pad,
+      bottom: (rect.bottom ?? rect.top + rect.height) + pad,
+    };
+  }
+
+  function intersectionArea(a, b) {
+    const overlapW = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+    const overlapH = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    return overlapW * overlapH;
+  }
+
+  function hasValidRect(rect) {
+    return (
+      Number.isFinite(rect?.left)
+      && Number.isFinite(rect?.top)
+      && Number.isFinite(rect?.width)
+      && Number.isFinite(rect?.height)
+      && rect.width > 0
+      && rect.height > 0
+    );
+  }
+
+  function computePillPosition(inputRect, viewport, pillSize, imageRect = null) {
     if (
       !Number.isFinite(inputRect?.left)
       || !Number.isFinite(inputRect?.bottom)
@@ -2158,22 +2184,85 @@
     ) {
       return { right: 16, bottom: 16 };
     }
+    const pillW = pillSize?.width || 160;
+    const pillH = pillSize?.height || 44;
     const clamp = (value, extent, size) => Math.max(
       VIEWPORT_MARGIN,
       Math.min(value, extent - size - VIEWPORT_MARGIN),
     );
-    return {
-      left: clamp(inputRect.left, viewport.width, pillSize.width || 160),
-      top: clamp(inputRect.bottom + 6, viewport.height, pillSize.height || 44),
+    const defaultPos = {
+      left: clamp(inputRect.left, viewport.width, pillW),
+      top: clamp(inputRect.bottom + 6, viewport.height, pillH),
     };
+    if (!hasValidRect(imageRect)) {
+      return defaultPos;
+    }
+
+    const inputTop = Number.isFinite(inputRect.top) ? inputRect.top : inputRect.bottom - inputRect.height;
+    const inputRight = Number.isFinite(inputRect.right) ? inputRect.right : inputRect.left + inputRect.width;
+    const imageRight = Number.isFinite(imageRect.right) ? imageRect.right : imageRect.left + imageRect.width;
+    const imageBottom = Number.isFinite(imageRect.bottom) ? imageRect.bottom : imageRect.top + imageRect.height;
+
+    const rawCandidates = [
+      { left: inputRect.left, top: inputRect.bottom + 6 },
+      { left: inputRight - pillW, top: inputTop - pillH - 6 },
+      { left: imageRight + 8, top: inputRect.bottom + 6 },
+      { left: inputRect.left, top: Math.min(inputTop, imageRect.top) - pillH - 6 },
+      { left: inputRect.left, top: Math.max(inputRect.bottom, imageBottom) + 6 },
+    ];
+
+    const blockedImage = expandRect(imageRect, 4);
+    const blockedInput = expandRect({
+      left: inputRect.left,
+      top: inputTop,
+      right: inputRight,
+      bottom: inputRect.bottom,
+    }, 2);
+
+    let bestPos = defaultPos;
+    let bestOverlap = Infinity;
+    for (const candidate of rawCandidates) {
+      const left = clamp(candidate.left, viewport.width, pillW);
+      const top = clamp(candidate.top, viewport.height, pillH);
+      const pillBox = { left, top, right: left + pillW, bottom: top + pillH };
+      const overlap = intersectionArea(pillBox, blockedImage) + intersectionArea(pillBox, blockedInput);
+      if (overlap === 0) {
+        return { left, top };
+      }
+      if (overlap < bestOverlap) {
+        bestOverlap = overlap;
+        bestPos = { left, top };
+      }
+    }
+    return bestPos;
+  }
+
+  function normalizeDigitHomoglyphs(text) {
+    return String(text || "").replace(/[OoIlZzSsB]/g, (ch) => {
+      if (ch === "O" || ch === "o") return "0";
+      if (ch === "I" || ch === "l") return "1";
+      if (ch === "Z" || ch === "z") return "2";
+      if (ch === "S" || ch === "s") return "5";
+      if (ch === "B") return "8";
+      return ch;
+    });
   }
 
   function buildSwapCandidates(currentAnswer, candidates) {
     const seen = new Set([currentAnswer]);
+    const digitsOnlyMode = /^[0-9]{4,8}$/.test(currentAnswer);
+    const seenDigits = new Set(digitsOnlyMode ? [currentAnswer] : []);
     const swaps = [];
     for (const candidate of candidates || []) {
       const answer = candidate?.answer;
       if (typeof answer !== "string" || !answer.trim() || seen.has(answer)) continue;
+      if (digitsOnlyMode) {
+        if (/^[0-9]+$/.test(answer)) {
+          seenDigits.add(answer);
+        } else if (seenDigits.has(normalizeDigitHomoglyphs(answer))) {
+          continue;
+        }
+      }
       seen.add(answer);
       swaps.push(candidate);
       if (swaps.length === 2) break;
@@ -2220,15 +2309,15 @@
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 6px;
-      padding: 6px 10px;
-      min-height: 40px;
+      gap: 5px;
+      padding: 5px 8px;
+      min-height: 34px;
       border: 1px solid rgba(59, 130, 246, 0.45);
-      border-radius: 12px;
+      border-radius: 10px;
       background: var(--ocr-popover);
       box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
       color: var(--ocr-fg);
-      font: 13px var(--ocr-font-sans);
+      font: 12.5px var(--ocr-font-sans);
       pointer-events: auto;
       touch-action: manipulation;
       -webkit-tap-highlight-color: transparent;
@@ -2236,7 +2325,7 @@
     }
     .badge {
       border-radius: 999px;
-      padding: 3px 8px;
+      padding: 2px 7px;
       font-size: 11px;
       font-weight: 700;
     }
@@ -2256,24 +2345,24 @@
       color: var(--ocr-danger);
     }
     .answer {
-      font: 700 14px var(--ocr-font-mono);
+      font: 700 13.5px var(--ocr-font-mono);
       letter-spacing: 0.04em;
       overflow-wrap: anywhere;
     }
     .status-text {
       color: var(--ocr-fg);
-      font-size: 12.5px;
+      font-size: 12px;
       font-weight: 600;
     }
     button {
       cursor: pointer;
-      min-height: 30px;
-      padding: 4px 10px;
-      border-radius: 8px;
+      min-height: 26px;
+      padding: 3px 8px;
+      border-radius: 7px;
       border: 1px solid var(--ocr-border);
       background: var(--ocr-secondary);
       color: var(--ocr-fg);
-      font: 600 12.5px var(--ocr-font-sans);
+      font: 600 12px var(--ocr-font-sans);
       touch-action: manipulation;
       -webkit-tap-highlight-color: transparent;
     }
@@ -2290,7 +2379,7 @@
       font-family: var(--ocr-font-mono);
     }
     .icon-btn {
-      padding: 4px 8px;
+      padding: 3px 6px;
       background: transparent;
       border-color: transparent;
       color: var(--ocr-muted);
@@ -2299,7 +2388,7 @@
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 6px;
+      gap: 5px;
     }
     .row[hidden] {
       display: none;
@@ -2401,12 +2490,14 @@
     function positionPill() {
       if (!host.isConnected && !host.parent) return;
       const input = currentTarget?.input;
-      const inputRect = input?.isConnected === false ? null : input?.getBoundingClientRect();
+      const image = currentTarget?.image;
+      const inputRect = input?.isConnected === false ? null : input?.getBoundingClientRect?.();
+      const imageRect = image?.isConnected === false ? null : image?.getBoundingClientRect?.();
       const viewport = {
         width: win.visualViewport?.width || win.innerWidth,
         height: win.visualViewport?.height || win.innerHeight,
       };
-      const coords = computePillPosition(inputRect, viewport, pill.getBoundingClientRect());
+      const coords = computePillPosition(inputRect, viewport, pill.getBoundingClientRect(), imageRect);
       for (const edge of ["left", "top", "right", "bottom"]) {
         pill.style[edge] = coords[edge] === undefined ? "" : `${coords[edge]}px`;
       }

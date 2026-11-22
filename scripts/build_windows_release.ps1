@@ -74,6 +74,7 @@ if (-not $SkipTests) {
         "tests\test_detect_helpers.js",
         "tests\test_feedback_helpers.js",
         "tests\test_floating_pill.js",
+        "tests\test_mobile_userscript.js",
         "tests\test_picker.js",
         "tests\test_popup_startup.js",
         "tests\test_site_profiles.js"
@@ -91,7 +92,9 @@ if (-not $SkipTests) {
         "extension\picker.js",
         "extension\popup.js",
         "extension\popup_startup.js",
-        "extension\site_profiles.js"
+        "extension\site_profiles.js",
+        "mobile\mobile_runtime.js",
+        "mobile\steven_captcha_ocr.user.js"
     )
 }
 

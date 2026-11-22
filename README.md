@@ -57,6 +57,12 @@
 
 GitHub 發布版已包含 `official` 與 `fusion_v7` 模型，不需要另外下載 ONNX。選用的 custom ONNX 僅供從原始碼執行的開發流程使用，不會放進發布 ZIP。
 
+### 方式三：iPhone / iPad Safari 手機版（Userscript 免電腦離線模式）
+
+1. 在 iPhone App Store 安裝免費開源的 **Userscripts**（或 **Stay**），並於「設定 → App → Safari → 延伸功能」開啟權限。
+2. 用 Safari 開啟一鍵安裝連結：`https://raw.githubusercontent.com/Stevenqqqq/steven-chrome-captcha-ocr/main/mobile/steven_captcha_ocr.user.js`，點擊彈出的安裝按鈕。
+3. 開啟含驗證碼的網頁時，輸入框旁會自動浮現 **「🔍 辨識驗證碼」** 按鈕，點一下即可在手機本地辨識並填入（首次點擊會自動下載並快取模型，之後離線秒開；閒置 3 分鐘自動釋放記憶體）。
+
 ## 使用
 
 1. 若使用本機服務模式，發布版先啟動 `StevenCaptchaOCR.exe`，開發版啟動 `啟動OCR服務.bat`；若已準備離線 ONNX，可直接免開終端使用。

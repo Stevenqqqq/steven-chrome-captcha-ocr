@@ -24,7 +24,9 @@ if exist "%VENV_PYTHON%" (
 
 where node.exe >nul 2>nul
 if not errorlevel 1 (
-  node.exe --test tests\test_background.js tests\test_browser_ocr.js tests\test_captcha_image.js tests\test_detect_helpers.js tests\test_feedback_helpers.js tests\test_floating_pill.js tests\test_picker.js tests\test_popup_startup.js tests\test_site_profiles.js
+  node.exe --test tests\test_background.js tests\test_browser_ocr.js tests\test_captcha_image.js tests\test_detect_helpers.js tests\test_feedback_helpers.js tests\test_floating_pill.js tests\test_mobile_userscript.js tests\test_picker.js tests\test_popup_startup.js tests\test_site_profiles.js
+  if errorlevel 1 set "FAILED=1"
+  node.exe --check extension\background.js extension\browser_ocr.js extension\captcha_image.js extension\detect.js extension\detect_helpers.js extension\feedback_helpers.js extension\floating_pill.js extension\offscreen.js extension\picker.js extension\popup.js extension\popup_startup.js extension\site_profiles.js mobile\mobile_runtime.js mobile\steven_captcha_ocr.user.js
   if errorlevel 1 set "FAILED=1"
 ) else (
   echo 找不到 Node.js，無法執行 Chrome 擴充功能測試。

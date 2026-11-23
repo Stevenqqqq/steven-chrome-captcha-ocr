@@ -9,7 +9,7 @@ const captchaImage = require("../extension/captcha_image.js");
 const browserOcr = require("../extension/browser_ocr.js");
 const mobile = require("../mobile/mobile_runtime.js");
 
-function makeMemoryIndexedDb() {
+function makeMemoryIndexedDb({ abortKey } = {}) {
   const stores = new Map();
   return {
     open(name) {
@@ -20,7 +20,7 @@ function makeMemoryIndexedDb() {
         createObjectStore: (s) => { stores.set(`${name}:${s}`, new Map()); },
         transaction(storeName) {
           const map = stores.get(`${name}:${storeName}`) || new Map();
-          return {
+          const tx = {
             objectStore() {
               return {
                 get(key) {
@@ -29,14 +29,16 @@ function makeMemoryIndexedDb() {
                   return req;
                 },
                 put(value, key) {
-                  map.set(key, value);
-                  const req = { onsuccess: null, onerror: null };
-                  queueMicrotask(() => req.onsuccess?.());
-                  return req;
+                  queueMicrotask(() => {
+                    if (key === abortKey) return tx.onabort?.();
+                    map.set(key, value);
+                    tx.oncomplete?.();
+                  });
                 },
               };
             },
           };
+          return tx;
         },
       };
       request.result = db;
@@ -84,6 +86,11 @@ test("createAssetLoader caches binary assets in memory and IndexedDB and prefers
   const cachedMem = await loader1.getBinary("test/model.onnx", ["https://example.com/mirror2.onnx"]);
   assert.equal(cachedMem.byteLength, 2048);
   assert.equal(gmCalls, 2);
+  loader1.clearMemoryCache();
+  assert.equal(loader1.hasMemoryAsset("test/model.onnx"), false);
+  assert.deepEqual(await loader1.getBinary("test/model.onnx", []), loaded);
+  loader1.clearMemoryCache();
+  assert.equal(loader1.hasMemoryAsset("test/model.onnx"), false);
 
   // New loader instance with same IndexedDB hits persistent IDB cache without network calls.
   const loader2 = mobile.createAssetLoader({ gmRequest, fetchImpl, indexedDB: idb });
@@ -101,6 +108,19 @@ test("createAssetLoader caches binary assets in memory and IndexedDB and prefers
   const fromFetch = await fetchOnlyLoader.getBinary("test/fallback.onnx", ["https://example.com/fallback.onnx"]);
   assert.equal(fromFetch.byteLength, 2048);
   assert.equal(fetchCalls, 1);
+  fetchOnlyLoader.clearMemoryCache();
+  assert.equal(fetchOnlyLoader.hasMemoryAsset("test/fallback.onnx"), true);
+});
+
+test("cache eviction preserves the only copy after an IndexedDB transaction abort", async () => {
+  const loader = mobile.createAssetLoader({
+    indexedDB: makeMemoryIndexedDb({ abortKey: "volatile" }),
+    gmRequest: ({ onload }) => onload({ status: 200, response: new ArrayBuffer(2048) }),
+  });
+  await Promise.all(["committed", "volatile"].map((key) => loader.getBinary(key, "fixture")));
+  loader.clearMemoryCache();
+  assert.equal(loader.hasMemoryAsset("committed"), false);
+  assert.equal(loader.hasMemoryAsset("volatile"), true);
 });
 
 test("createMobileOcrEngine warms up via virtual fetch, falls back to official-only, and auto-releases after idle", async () => {
@@ -190,7 +210,6 @@ test("createMobileOcrEngine warms up via virtual fetch, falls back to official-o
     browserOcr,
     officialCharset,
     fusionConfig,
-    idleMs: 180_000,
     setTimer: (fn, ms) => {
       scheduledFn = fn;
       scheduledMs = ms;
@@ -215,7 +234,8 @@ test("createMobileOcrEngine warms up via virtual fetch, falls back to official-o
   assert.equal(engine.getState().hasIdleTimer, false);
   assert.equal(fakeOrt.env.wasm.numThreads, 1);
   assert.equal(fakeOrt.env.wasm.proxy, false);
-  assert.ok(fakeOrt.env.wasm.wasmBinary instanceof Uint8Array);
+  assert.equal(fakeOrt.env.wasm.wasmBinary, undefined);
+  assert.equal(engine.hasRuntime, true);
 
   resolveGate();
   const res = await recogPromise;
@@ -227,7 +247,7 @@ test("createMobileOcrEngine warms up via virtual fetch, falls back to official-o
   assert.equal(disposedSessions, 1);
   assert.equal(engine.getState().inFlight, 0);
   assert.equal(engine.getState().hasIdleTimer, true);
-  assert.equal(scheduledMs, 180_000);
+  assert.equal(scheduledMs, 120_000);
 
   // Trigger idle timeout and verify session is released.
   await scheduledFn();
@@ -324,17 +344,15 @@ function createMobileDomFixture({ imageTag = "img", inputType = "text" } = {}) {
     }
   }
 
-  const win = {
+  const win = Object.assign(new EventTarget(), {
     Event,
     HTMLInputElement: Input,
     innerWidth: 390,
     innerHeight: 844,
     getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1", backgroundImage: "none" }),
-    addEventListener() {},
-    removeEventListener() {},
     setTimeout,
     clearTimeout,
-  };
+  });
 
   const html = new Node("html");
   const body = new Node("body");
@@ -352,7 +370,7 @@ function createMobileDomFixture({ imageTag = "img", inputType = "text" } = {}) {
   input.setAttribute("placeholder", "請輸入驗證碼");
   body.append(img, input);
 
-  const doc = {
+  const doc = Object.assign(new EventTarget(), {
     defaultView: win,
     documentElement: html,
     body,
@@ -372,11 +390,111 @@ function createMobileDomFixture({ imageTag = "img", inputType = "text" } = {}) {
     },
     getElementById: (id) => html.querySelectorAll(`#${id}`)[0] || null,
     querySelectorAll: (selector) => html.querySelectorAll(selector),
-    addEventListener() {},
-    removeEventListener() {},
-  };
+  });
 
   return { doc, win, img, input };
+}
+
+test("background events release idle sessions and defer release until active work finishes", async (t) => {
+  const { doc, win } = createMobileDomFixture();
+  const menu = new Map();
+  globalThis.GM_registerMenuCommand = (label, callback) => menu.set(label, callback);
+  globalThis.ort = { InferenceSession: { create() {} } };
+  t.after(() => {
+    delete globalThis.ort;
+    delete globalThis.GM_registerMenuCommand;
+  });
+  const calls = [];
+  let signalActive;
+  let finish;
+  const active = new Promise((resolve) => { signalActive = resolve; });
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const { engine, assetLoader, uiController } = mobile.startMobileUserscript({
+    doc, detect, captchaImage,
+    browserOcr: {
+      createBrowserOcrRuntime: () => ({
+        async warmUp() {},
+        recognizeRgba() { signalActive(); return pending; },
+        async dispose() { calls.push("dispose"); },
+      }),
+    },
+  });
+  assetLoader.clearMemoryCache = () => calls.push("clear");
+  const recognition = engine.recognizeRgba({});
+  await active;
+  doc.visibilityState = "hidden";
+  doc.dispatchEvent(new Event("visibilitychange"));
+  win.dispatchEvent(new Event("pagehide"));
+  assert.equal(engine.hasRuntime, true);
+  assert.deepEqual(calls, []);
+  finish("done");
+  assert.equal(await recognition, "done");
+  assert.equal(engine.hasRuntime, false);
+  assert.deepEqual(calls, ["dispose", "clear"]);
+
+  await engine.ensureRuntime();
+  doc.visibilityState = "visible";
+  doc.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(engine.hasRuntime, true);
+  win.dispatchEvent(new Event("pagehide"));
+  await new Promise(setImmediate);
+  assert.equal(engine.hasRuntime, false);
+  await engine.ensureRuntime();
+  doc.visibilityState = "hidden";
+  doc.dispatchEvent(new Event("visibilitychange"));
+  await new Promise(setImmediate);
+  assert.equal(engine.hasRuntime, false);
+  await engine.ensureRuntime();
+  await menu.get("🧹 立即釋放 OCR 記憶體")();
+  assert.deepEqual(calls, Array(4).fill(["dispose", "clear"]).flat());
+  uiController.close();
+  await engine.ensureRuntime();
+  win.dispatchEvent(new Event("pagehide"));
+  doc.dispatchEvent(new Event("visibilitychange"));
+  assert.equal(engine.hasRuntime, true);
+  await engine.dispose();
+});
+
+for (const pointer of [true, false]) {
+  test(`pill drag via ${pointer ? "pointer" : "touch"} survives scans and viewport changes`, () => {
+    const { doc, win } = createMobileDomFixture();
+    if (pointer) win.PointerEvent = Event;
+    const ui = mobile.mountMobileCaptchaUi({ doc, detect, engine: {}, observeMutations: false });
+    const host = doc.getElementById(mobile.HOST_ID);
+    const [, pill] = host.shadowRoot.children;
+    const [handle] = pill.children;
+    const fire = (target, phase, x, y, id = 1) => {
+      const point = { clientX: x, clientY: y };
+      const suffix = pointer ? { start: "down", move: "move", end: "up", cancel: "cancel" }[phase] : phase;
+      const event = new Event((pointer ? "pointer" : "touch") + suffix, { cancelable: true });
+      Object.assign(event, pointer
+        ? { ...point, pointerId: id, button: 0 }
+        : { changedTouches: [{ ...point, identifier: id }] });
+      target.dispatchEvent(event);
+    };
+    assert.equal(handle.className, "drag-handle");
+    fire(handle, "start", 15, 15);
+    fire(win, "move", 200, 320);
+    assert.deepEqual([pill.style.left, pill.style.top], ["195px", "315px"]);
+    fire(win, "move", 300, 400, 2);
+    fire(win, "end", 200, 320);
+    fire(win, "move", 50, 50);
+    ui.scan();
+    assert.deepEqual([pill.style.left, pill.style.top], ["195px", "315px"]);
+    win.innerWidth = 270;
+    win.innerHeight = 300;
+    win.dispatchEvent(new Event("resize"));
+    assert.deepEqual(pill.style, { left: "138px", top: "248px", right: "", bottom: "" });
+    ui.dismiss();
+    ui.scan({ force: true });
+    assert.notEqual(pill.style.top, "248px");
+    fire(handle, "start", 15, 15);
+    fire(win, "move", -10, -10);
+    fire(win, "cancel", -10, -10);
+    fire(win, "move", 100, 100);
+    assert.deepEqual([pill.style.left, pill.style.top], ["12px", "12px"]);
+    ui.close();
+  });
 }
 
 test("mountMobileCaptchaUi detects CAPTCHA pair, recognizes on tap, fills native value, swaps candidates, and retries", async () => {
@@ -431,7 +549,7 @@ test("mountMobileCaptchaUi detects CAPTCHA pair, recognizes on tap, fills native
   assert.equal(ui.getUiState().mode, "idle");
 
   const [, pill] = host.shadowRoot.children;
-  const [mainRow, swapsRow] = pill.children;
+  const [, mainRow, swapsRow] = pill.children;
   assert.equal(mainRow.children[0].textContent, "🔍 辨識驗證碼");
 
   // Tap recognize button.

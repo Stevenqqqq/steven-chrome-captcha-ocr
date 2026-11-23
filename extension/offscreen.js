@@ -5,7 +5,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
 
-  const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+  const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
   function createOffscreenController({
     runtime,
@@ -89,6 +89,19 @@
               requestId: message.requestId,
             };
           }
+        }
+
+        if (message.type === "OCR_DISPOSE") {
+          if (inFlight > 1) {
+            return { ok: false, busy: true, error: "OCR inference in flight", requestId: message.requestId };
+          }
+          closing = true;
+          try {
+            await runtime?.dispose?.();
+          } finally {
+            setTimer(() => onClose(), 0);
+          }
+          return { ok: true, disposed: true, requestId: message.requestId };
         }
 
         return { ok: false, error: "Unsupported offscreen message", requestId: message.requestId };

@@ -394,12 +394,31 @@ function applyActiveEngineUi() {
   return false;
 }
 
+async function disposeBrowserEngine() {
+  if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") return;
+  try {
+    await chrome.runtime.sendMessage({ type: "OCR_BG_DISPOSE" });
+  } catch {
+    // Ignore errors when offscreen document is already closed.
+  }
+}
+
 async function checkService() {
-  const [pref, browserStatus, pythonStatus] = await Promise.all([
-    loadEnginePreference(),
-    probeBrowserEngine(),
-    probePythonService(),
-  ]);
+  const pref = await loadEnginePreference();
+  let browserStatus = { ok: false, models: [], error: null };
+  let pythonStatus = { ok: false, solvers: [], error: null };
+
+  if (pref === "python") {
+    pythonStatus = await probePythonService();
+    if (!pythonStatus.ok) {
+      browserStatus = await probeBrowserEngine();
+    }
+  } else {
+    [browserStatus, pythonStatus] = await Promise.all([
+      probeBrowserEngine(),
+      probePythonService(),
+    ]);
+  }
   engineHealth = { browser: browserStatus, python: pythonStatus };
 
   if (pref === "browser" && browserStatus.ok) {
@@ -430,6 +449,10 @@ async function toggleEngineMode() {
     activeEngineMode = next;
     if (globalThis.chrome?.storage?.local) {
       await chrome.storage.local.set({ [ENGINE_PREF_KEY]: next }).catch(() => {});
+    }
+    if (next === "python") {
+      await disposeBrowserEngine();
+      engineHealth.browser = { ok: false, models: [], error: null };
     }
     applyActiveEngineUi();
   } else {
@@ -834,6 +857,11 @@ document?.addEventListener?.("keydown", (event) => {
   if (index >= 0 && index < activeCandidates.length) {
     applyCandidateChoice(activeCandidates[index].answer).catch(() => {});
   }
+});
+
+window?.addEventListener?.("pagehide", () => {
+  updateThumbPreview("");
+  activeCapturedBlob = null;
 });
 
 PopupStartup.startPopup({

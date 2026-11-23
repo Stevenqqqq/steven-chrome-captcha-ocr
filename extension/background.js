@@ -19,18 +19,21 @@
     }
   }
 
+  async function hasOffscreenDocument(chromeApi, path = OFFSCREEN_DOCUMENT) {
+    if (typeof chromeApi?.runtime?.getContexts !== "function") return false;
+    const offscreenUrl = chromeApi.runtime?.getURL ? chromeApi.runtime.getURL(path) : path;
+    const existing = await chromeApi.runtime.getContexts({
+      contextTypes: ["OFFSCREEN_DOCUMENT"],
+      documentUrls: [offscreenUrl],
+    });
+    return existing.length > 0;
+  }
+
   async function ensureOffscreenDocument(chromeApi, path = OFFSCREEN_DOCUMENT) {
     if (!chromeApi?.offscreen?.createDocument) {
       throw new Error("目前瀏覽器版本不支援 Offscreen Document");
     }
-    const offscreenUrl = chromeApi.runtime?.getURL ? chromeApi.runtime.getURL(path) : path;
-    if (typeof chromeApi.runtime?.getContexts === "function") {
-      const existing = await chromeApi.runtime.getContexts({
-        contextTypes: ["OFFSCREEN_DOCUMENT"],
-        documentUrls: [offscreenUrl],
-      });
-      if (existing.length > 0) return true;
-    }
+    if (await hasOffscreenDocument(chromeApi, path)) return true;
     if (!creatingOffscreen) {
       creatingOffscreen = chromeApi.offscreen.createDocument({
         url: path,
@@ -42,6 +45,25 @@
     }
     await creatingOffscreen;
     return true;
+  }
+
+  async function disposeOffscreenDocument(chromeApi, path = OFFSCREEN_DOCUMENT) {
+    if (!(await hasOffscreenDocument(chromeApi, path))) {
+      return { ok: true, disposed: false, alreadyClosed: true };
+    }
+    try {
+      const response = await chromeApi.runtime.sendMessage({
+        type: "OCR_DISPOSE",
+        target: "offscreen",
+        requestId: `dispose-${Date.now()}`,
+      });
+      return response || { ok: true, disposed: true };
+    } catch {
+      if (typeof chromeApi?.offscreen?.closeDocument === "function") {
+        await chromeApi.offscreen.closeDocument().catch(() => {});
+      }
+      return { ok: true, disposed: true };
+    }
   }
 
   async function forwardToOffscreen(chromeApi, payload) {
@@ -85,6 +107,12 @@
           .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
         return true;
       }
+      if (message?.type === "OCR_BG_DISPOSE") {
+        disposeOffscreenDocument(chromeApi)
+          .then(sendResponse)
+          .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+        return true;
+      }
       return false;
     });
   }
@@ -97,7 +125,9 @@
     OFFSCREEN_DOCUMENT,
     SHORTCUT_COMMAND,
     SHORTCUT_POPUP,
+    hasOffscreenDocument,
     ensureOffscreenDocument,
+    disposeOffscreenDocument,
     forwardToOffscreen,
     openShortcutPopup,
     registerOffscreenBridge,

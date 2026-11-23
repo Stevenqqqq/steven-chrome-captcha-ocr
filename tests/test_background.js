@@ -6,6 +6,7 @@ const {
   OFFSCREEN_DOCUMENT,
   SHORTCUT_COMMAND,
   SHORTCUT_POPUP,
+  disposeOffscreenDocument,
   ensureOffscreenDocument,
   openShortcutPopup,
   registerShortcut,
@@ -100,4 +101,33 @@ test("ensureOffscreenDocument creates once and skips when context already exists
   assert.equal(created, 1);
   await ensureOffscreenDocument(chromeApi);
   assert.equal(created, 1);
+});
+
+test("disposeOffscreenDocument skips creating when closed and forwards OCR_DISPOSE when open", async () => {
+  let existing = [];
+  const sent = [];
+  const chromeApi = {
+    runtime: {
+      getURL: (p) => `chrome-extension://test/${p}`,
+      getContexts: async () => existing,
+      sendMessage: async (msg) => {
+        sent.push(msg);
+        return { ok: true, disposed: true };
+      },
+    },
+    offscreen: {
+      createDocument: async () => { throw new Error("must not create during dispose"); },
+    },
+  };
+
+  const closedRes = await disposeOffscreenDocument(chromeApi);
+  assert.equal(closedRes.alreadyClosed, true);
+  assert.equal(sent.length, 0);
+
+  existing = [{ documentUrl: `chrome-extension://test/${OFFSCREEN_DOCUMENT}` }];
+  const openRes = await disposeOffscreenDocument(chromeApi);
+  assert.equal(openRes.disposed, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].type, "OCR_DISPOSE");
+  assert.equal(sent[0].target, "offscreen");
 });

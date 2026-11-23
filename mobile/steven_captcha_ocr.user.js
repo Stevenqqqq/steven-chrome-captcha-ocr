@@ -1649,7 +1649,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
 
-  const IDLE_TIMEOUT_MS = 3 * 60 * 1000;
+  const IDLE_TIMEOUT_MS = 2 * 60 * 1000;
   const VIRTUAL_MODEL_BASE_URL = "steven-userscript://models";
   const HOST_ID = "steven-ocr-mobile-host";
   const disposeHostSymbol = Symbol.for("steven-ocr-mobile.dispose");
@@ -1786,16 +1786,15 @@
 
   async function writeIdbAsset(dbPromise, key, bytes) {
     const db = await dbPromise;
-    if (!db) return;
-    await new Promise((resolve) => {
+    if (!db) return false;
+    return new Promise((resolve) => {
       try {
         const tx = db.transaction(IDB_STORE, "readwrite");
-        const store = tx.objectStore(IDB_STORE);
-        const req = store.put(slicedArrayBuffer(bytes), key);
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
+        tx.oncomplete = () => resolve(true);
+        tx.onabort = tx.onerror = () => resolve(false);
+        tx.objectStore(IDB_STORE).put(slicedArrayBuffer(bytes), key);
       } catch {
-        resolve();
+        resolve(false);
       }
     });
   }
@@ -1811,6 +1810,7 @@
     minBytes = MIN_ASSET_BYTES,
   } = {}) {
     const memoryCache = new Map();
+    const persistedKeys = new Set();
     const pendingLoads = new Map();
     const dbPromise = openAssetDb(indexedDB);
 
@@ -1901,13 +1901,14 @@
       const loadPromise = (async () => {
         const cached = await readIdbAsset(dbPromise, key);
         if (cached && cached.byteLength >= minBytes) {
+          persistedKeys.add(key);
           memoryCache.set(key, cached);
           return cached;
         }
         onProgress?.({ stage: "download", key });
         const downloaded = await fetchRawBytes(urls, { minByteLength: minBytes });
         memoryCache.set(key, downloaded);
-        await writeIdbAsset(dbPromise, key, downloaded);
+        if (await writeIdbAsset(dbPromise, key, downloaded)) persistedKeys.add(key);
         return downloaded;
       })();
 
@@ -1922,6 +1923,10 @@
     return {
       getBinary,
       fetchRawBytes,
+      clearMemoryCache() {
+        for (const key of persistedKeys) memoryCache.delete(key);
+        persistedKeys.clear();
+      },
       hasMemoryAsset: (key) => memoryCache.has(key),
     };
   }
@@ -2303,6 +2308,7 @@
     let disposePromise = Promise.resolve();
     let inFlight = 0;
     let idleTimer = null;
+    let releaseWhenIdle = false;
 
     function cancelIdleTimer() {
       if (idleTimer !== null) {
@@ -2312,19 +2318,30 @@
     }
 
     async function releaseForIdle() {
-      idleTimer = null;
-      if (inFlight > 0 || !runtime) return;
+      cancelIdleTimer();
+      if (inFlight > 0) {
+        releaseWhenIdle = true;
+        return;
+      }
+      if (initPromise) {
+        await initPromise.catch(() => {});
+        return releaseForIdle();
+      }
+      releaseWhenIdle = false;
       const active = runtime;
       runtime = null;
-      disposePromise = Promise.resolve(active.dispose?.()).catch(() => {});
+      if (active) {
+        disposePromise = Promise.resolve().then(() => active.dispose?.()).catch(() => {});
+      }
       await disposePromise;
+      assetLoader?.clearMemoryCache?.();
     }
 
     function scheduleIdleTimer() {
       cancelIdleTimer();
       if (inFlight > 0 || !runtime || !(idleMs > 0)) return;
       idleTimer = setTimer(() => {
-        releaseForIdle().catch(() => {});
+        return releaseForIdle().catch(() => {});
       }, idleMs);
     }
 
@@ -2386,6 +2403,7 @@
           // Retry with official-only bundle if fusion_v7 download/init fails.
           runtime = await buildAndWarm(false);
         }
+        if (ortInstance.env?.wasm) ortInstance.env.wasm.wasmBinary = undefined;
         return runtime;
       })();
 
@@ -2405,17 +2423,8 @@
         return await activeRuntime.recognizeRgba(params);
       } finally {
         inFlight -= 1;
-        if (inFlight === 0 && runtime) scheduleIdleTimer();
-      }
-    }
-
-    async function dispose() {
-      cancelIdleTimer();
-      const active = runtime;
-      runtime = null;
-      if (active) {
-        disposePromise = Promise.resolve(active.dispose?.()).catch(() => {});
-        await disposePromise;
+        if (inFlight === 0 && releaseWhenIdle) await releaseForIdle();
+        else if (inFlight === 0 && runtime) scheduleIdleTimer();
       }
     }
 
@@ -2423,8 +2432,9 @@
       IDLE_TIMEOUT_MS: idleMs,
       ensureRuntime,
       recognizeRgba,
-      dispose,
+      dispose: releaseForIdle,
       releaseForIdle,
+      get hasRuntime() { return Boolean(runtime); },
       getState: () => ({
         hasRuntime: Boolean(runtime),
         inFlight,
@@ -2459,6 +2469,10 @@
     );
   }
 
+  function clamp(value, extent, size) {
+    return Math.max(VIEWPORT_MARGIN, Math.min(value, extent - size - VIEWPORT_MARGIN));
+  }
+
   function computePillPosition(inputRect, viewport, pillSize, imageRect = null) {
     if (
       !Number.isFinite(inputRect?.left)
@@ -2470,10 +2484,6 @@
     }
     const pillW = pillSize?.width || 160;
     const pillH = pillSize?.height || 44;
-    const clamp = (value, extent, size) => Math.max(
-      VIEWPORT_MARGIN,
-      Math.min(value, extent - size - VIEWPORT_MARGIN),
-    );
     const defaultPos = {
       left: clamp(inputRect.left, viewport.width, pillW),
       top: clamp(inputRect.bottom + 6, viewport.height, pillH),
@@ -2607,6 +2617,13 @@
       -webkit-tap-highlight-color: transparent;
       user-select: none;
     }
+    .drag-handle {
+      padding: 4px;
+      opacity: .65;
+      cursor: grab;
+      touch-action: none;
+    }
+    .drag-handle:active { cursor: grabbing; }
     .badge {
       border-radius: 999px;
       padding: 2px 7px;
@@ -2690,6 +2707,7 @@
     assetLoader,
     decodeBlob,
     observeMutations = true,
+    onClose,
   }) {
     if (!doc?.documentElement || !engine || !detect) return null;
     const win = doc.defaultView || root;
@@ -2731,7 +2749,9 @@
 
     const mainRow = make("div", "row");
     const swapsRow = make("div", "row");
-    pill.append(mainRow, swapsRow);
+    const dragHandle = make("span", "drag-handle", "⋮⋮");
+    dragHandle.title = "拖曳以移動";
+    pill.append(dragHandle, mainRow, swapsRow);
     shadow.append(make("style", "", MOBILE_PILL_CSS), pill);
 
     let mode = "idle"; // idle | busy | result | error
@@ -2745,14 +2765,62 @@
     let closed = false;
     let scanTimer = null;
     let observer = null;
+    let userDragPos = null;
+    let drag = null;
+
+    // Choose one event family so a touch never starts two gestures.
+    const usePointer = typeof win.PointerEvent === "function";
+    const [startEvent, moveEvent, endEvent, cancelEvent] = usePointer
+      ? ["pointerdown", "pointermove", "pointerup", "pointercancel"]
+      : ["touchstart", "touchmove", "touchend", "touchcancel"];
+
+    function dragPoint(event) {
+      if (usePointer) return !drag || drag.id === event.pointerId ? event : null;
+      return Array.from(event.changedTouches).find((touch) => !drag || touch.identifier === drag.id);
+    }
+
+    function startDrag(event) {
+      if (drag || (usePointer && (event.button !== 0 || event.isPrimary === false))) return;
+      const point = dragPoint(event);
+      if (!point) return;
+      event.preventDefault();
+      const rect = pill.getBoundingClientRect();
+      drag = {
+        id: usePointer ? event.pointerId : point.identifier,
+        offsetX: point.clientX - rect.left,
+        offsetY: point.clientY - rect.top,
+      };
+      if (usePointer) dragHandle.setPointerCapture?.(event.pointerId);
+      win.addEventListener(moveEvent, moveDrag, { passive: false });
+      win.addEventListener(endEvent, endDrag);
+      win.addEventListener(cancelEvent, endDrag);
+    }
+
+    function moveDrag(event) {
+      if (!drag) return;
+      const point = dragPoint(event);
+      if (!point) return;
+      event.preventDefault();
+      userDragPos = { left: point.clientX - drag.offsetX, top: point.clientY - drag.offsetY };
+      positionPill();
+    }
+
+    function endDrag(event) {
+      if (drag && dragPoint(event)) stopDrag();
+    }
+
+    function stopDrag() {
+      drag = null;
+      win.removeEventListener(moveEvent, moveDrag);
+      win.removeEventListener(endEvent, endDrag);
+      win.removeEventListener(cancelEvent, endDrag);
+    }
+
+    dragHandle.addEventListener(startEvent, startDrag, { passive: false });
 
     function targetKey(target) {
       if (!target?.image || !target?.input) return "";
-      const id = detect.imageIdentity(
-        target.image,
-        "",
-        win.getComputedStyle(target.image).backgroundImage,
-      );
+      const id = imageIdentity(target.image);
       return `${id}|${target.input.id || target.input.name || "input"}`;
     }
 
@@ -2781,7 +2849,12 @@
         width: win.visualViewport?.width || win.innerWidth,
         height: win.visualViewport?.height || win.innerHeight,
       };
-      const coords = computePillPosition(inputRect, viewport, pill.getBoundingClientRect(), imageRect);
+      const rect = pill.getBoundingClientRect();
+      if (userDragPos) {
+        userDragPos.left = clamp(userDragPos.left, viewport.width, rect.width);
+        userDragPos.top = clamp(userDragPos.top, viewport.height, rect.height);
+      }
+      const coords = userDragPos || computePillPosition(inputRect, viewport, rect, imageRect);
       for (const edge of ["left", "top", "right", "bottom"]) {
         pill.style[edge] = coords[edge] === undefined ? "" : `${coords[edge]}px`;
       }
@@ -2866,6 +2939,7 @@
       if (closed || mode === "busy") return;
       const freshTarget = detectCaptchaTarget(doc, detect);
       if (freshTarget.ok) {
+        if (targetChanged(freshTarget)) resetDrag();
         currentTarget = freshTarget;
       }
       if (!currentTarget?.image || !currentTarget?.input) return;
@@ -2908,7 +2982,13 @@
       }
     }
 
+    function resetDrag() {
+      stopDrag();
+      userDragPos = null;
+    }
+
     function detachHost() {
+      resetDrag();
       host.remove();
     }
 
@@ -2929,6 +3009,16 @@
         && editableInput(currentTarget.input)
         && isElementVisible(currentTarget.input, win)
       );
+    }
+
+    function imageIdentity(image) {
+      return detect.imageIdentity(image, "", win.getComputedStyle(image).backgroundImage);
+    }
+
+    function targetChanged(target, identity = imageIdentity(target.image)) {
+      return target.input !== currentTarget?.input
+        || target.image !== currentTarget?.image
+        || identity !== currentIdentity;
     }
 
     function scan({ force = false } = {}) {
@@ -2954,12 +3044,9 @@
       }
       if (force) dismissedKey = "";
 
-      const identity = detect.imageIdentity(
-        found.image,
-        "",
-        win.getComputedStyle(found.image).backgroundImage,
-      );
-      if (identity !== currentIdentity || found.input !== currentTarget?.input) {
+      const identity = imageIdentity(found.image);
+      if (targetChanged(found, identity)) {
+        resetDrag();
         mode = "idle";
         lastResult = null;
         currentAnswer = "";
@@ -2992,11 +3079,13 @@
       }
       observer?.disconnect();
       observer = null;
+      dragHandle.removeEventListener(startEvent, startDrag);
       win.removeEventListener("resize", positionPill);
       win.removeEventListener("scroll", positionPill, true);
       win.visualViewport?.removeEventListener("resize", positionPill);
       doc.removeEventListener?.("focusin", scheduleScan, true);
       detachHost();
+      onClose?.();
     }
 
     host[disposeHostSymbol] = close;
@@ -3054,16 +3143,30 @@
       assets,
       onStatus: (text) => uiController?.setEngineStatus(text),
     });
+    const win = doc?.defaultView || root;
+    const release = () => engine.releaseForIdle();
+    const onVisibility = () => {
+      if (doc.visibilityState === "hidden") release();
+    };
     uiController = mountMobileCaptchaUi({
       doc,
       engine,
       detect,
       captchaImage,
       assetLoader,
+      onClose() {
+        doc.removeEventListener("visibilitychange", onVisibility);
+        win.removeEventListener("pagehide", release);
+      },
     });
+    if (uiController) {
+      doc.addEventListener("visibilitychange", onVisibility);
+      win.addEventListener("pagehide", release);
+    }
     const registerMenu = resolveGmRegisterMenu();
     if (registerMenu && uiController) {
       try {
+        registerMenu("🧹 立即釋放 OCR 記憶體", () => engine.dispose());
         registerMenu("🔍 重新偵測並辨識驗證碼", () => {
           uiController.scan({ force: true });
           uiController.recognizeCurrent();

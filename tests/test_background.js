@@ -9,6 +9,7 @@ const {
   disposeOffscreenDocument,
   ensureOffscreenDocument,
   openShortcutPopup,
+  recognizeFromPage,
   registerShortcut,
 } = require("../extension/background.js");
 
@@ -130,4 +131,51 @@ test("disposeOffscreenDocument skips creating when closed and forwards OCR_DISPO
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, "OCR_DISPOSE");
   assert.equal(sent[0].target, "offscreen");
+});
+
+test("recognizeFromPage honors enginePreference and falls back cleanly between offscreen and Python", async () => {
+  let pref = "browser";
+  let browserShouldFail = false;
+  let pythonShouldFail = false;
+  const calls = [];
+  const chromeApi = {
+    storage: { local: { get: async () => ({ enginePreference: pref }) } },
+    runtime: {
+      getURL: (p) => `chrome-extension://test/${p}`,
+      getContexts: async () => [{ documentUrl: `chrome-extension://test/${OFFSCREEN_DOCUMENT}` }],
+      sendMessage: async (msg) => {
+        calls.push(["browser", msg.type]);
+        if (browserShouldFail) return { ok: false, error: "no models" };
+        return { ok: true, answer: "ABCD", engine: "browser_onnx" };
+      },
+    },
+    offscreen: { createDocument: async () => {} },
+  };
+  const fakeFetch = async (url) => {
+    calls.push(["python", url]);
+    if (pythonShouldFail) throw new Error("ECONNREFUSED");
+    return { ok: true, json: async () => ({ ok: true, answer: "1234", engine: "python" }) };
+  };
+  const sampleDataUrl = "data:image/png;base64,iVBORw0KGgo=";
+
+  const r1 = await recognizeFromPage(chromeApi, { imageDataUrl: sampleDataUrl, expectedLength: 4 }, fakeFetch);
+  assert.equal(r1.answer, "ABCD");
+  assert.deepEqual(calls, [["browser", "OCR_RECOGNIZE"]]);
+
+  calls.length = 0;
+  browserShouldFail = true;
+  const r2 = await recognizeFromPage(chromeApi, { imageDataUrl: sampleDataUrl, expectedLength: 4, charsetHint: "digits" }, fakeFetch);
+  assert.equal(r2.answer, "1234");
+  assert.equal(calls[0][0], "browser");
+  assert.equal(calls[1][0], "python");
+  assert.match(calls[1][1], /expectedLength=4&charsetHint=digits/);
+
+  calls.length = 0;
+  pref = "python";
+  browserShouldFail = false;
+  pythonShouldFail = true;
+  const r3 = await recognizeFromPage(chromeApi, { imageDataUrl: sampleDataUrl }, fakeFetch);
+  assert.equal(r3.answer, "ABCD");
+  assert.equal(calls[0][0], "python");
+  assert.equal(calls[1][0], "browser");
 });

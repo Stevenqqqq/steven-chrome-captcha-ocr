@@ -13,7 +13,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
 
-  const IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+  const IDLE_TIMEOUT_MS = 90 * 1000;
   const VIRTUAL_MODEL_BASE_URL = "steven-userscript://models";
   const HOST_ID = "steven-ocr-mobile-host";
   const disposeHostSymbol = Symbol.for("steven-ocr-mobile.dispose");
@@ -1131,6 +1131,8 @@
     let observer = null;
     let userDragPos = null;
     let drag = null;
+    let viewportListening = false;
+    let positionRaf = null;
 
     // Choose one event family so a touch never starts two gestures.
     const usePointer = typeof win.PointerEvent === "function";
@@ -1203,6 +1205,39 @@
       return input.value === value;
     }
 
+    function attachViewportListeners() {
+      if (viewportListening) return;
+      viewportListening = true;
+      win.addEventListener("resize", schedulePosition);
+      win.addEventListener("scroll", schedulePosition, true);
+      win.visualViewport?.addEventListener("resize", schedulePosition);
+    }
+
+    function detachViewportListeners() {
+      if (!viewportListening) return;
+      viewportListening = false;
+      if (positionRaf !== null) {
+        win.cancelAnimationFrame?.(positionRaf);
+        positionRaf = null;
+      }
+      win.removeEventListener("resize", schedulePosition);
+      win.removeEventListener("scroll", schedulePosition, true);
+      win.visualViewport?.removeEventListener("resize", schedulePosition);
+    }
+
+    function schedulePosition() {
+      if (closed || !viewportListening) return;
+      if (typeof win.requestAnimationFrame === "function") {
+        if (positionRaf !== null) return;
+        positionRaf = win.requestAnimationFrame(() => {
+          positionRaf = null;
+          positionPill();
+        });
+      } else {
+        positionPill();
+      }
+    }
+
     function positionPill() {
       if (!host.isConnected && !host.parent) return;
       const input = currentTarget?.input;
@@ -1228,6 +1263,7 @@
       if (closed || !currentTarget) return;
       if (!host.parent && !host.isConnected) {
         doc.documentElement.append(host);
+        attachViewportListeners();
       }
       swapsRow.replaceChildren();
       swapsRow.hidden = true;
@@ -1353,6 +1389,7 @@
 
     function detachHost() {
       resetDrag();
+      detachViewportListeners();
       host.remove();
     }
 
@@ -1387,6 +1424,18 @@
 
     function scan({ force = false } = {}) {
       if (closed || mode === "busy") return;
+      if (!force && doc.visibilityState === "hidden") return;
+      if (!force && typeof doc.querySelector === "function" && !doc.querySelector("input")) {
+        if (currentTarget) {
+          currentTarget = null;
+          currentIdentity = "";
+          lastResult = null;
+          currentAnswer = "";
+          mode = "idle";
+          detachHost();
+        }
+        return;
+      }
       const found = detectCaptchaTarget(doc, detect);
       if (!found.ok) {
         if (!force && canPreserveCurrentTarget()) {
@@ -1421,11 +1470,11 @@
     }
 
     function scheduleScan() {
-      if (closed || scanTimer !== null) return;
+      if (closed || scanTimer !== null || doc.visibilityState === "hidden") return;
       scanTimer = win.setTimeout(() => {
         scanTimer = null;
         scan();
-      }, 250);
+      }, 400);
     }
 
     function setEngineStatus(text) {
@@ -1444,22 +1493,17 @@
       observer?.disconnect();
       observer = null;
       dragHandle.removeEventListener(startEvent, startDrag);
-      win.removeEventListener("resize", positionPill);
-      win.removeEventListener("scroll", positionPill, true);
-      win.visualViewport?.removeEventListener("resize", positionPill);
       doc.removeEventListener?.("focusin", scheduleScan, true);
       detachHost();
       onClose?.();
     }
 
     host[disposeHostSymbol] = close;
-    win.addEventListener("resize", positionPill);
-    win.addEventListener("scroll", positionPill, true);
-    win.visualViewport?.addEventListener("resize", positionPill);
     doc.addEventListener?.("focusin", scheduleScan, true);
 
     if (observeMutations && typeof win.MutationObserver === "function" && doc.body) {
       observer = new win.MutationObserver((mutations) => {
+        if (doc.visibilityState === "hidden") return;
         const relevant = mutations.some((m) => m.target !== host && !isInsideMobileHost(m.target));
         if (relevant) scheduleScan();
       });
@@ -1467,7 +1511,7 @@
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["src", "style", "class"],
+        attributeFilter: ["src", "srcset"],
       });
     }
 

@@ -8,6 +8,8 @@ const engineLabel = document.querySelector("#engineLabel");
 const siteStatusText = document.querySelector("#siteStatusText");
 const siteRuleBadge = document.querySelector("#siteRuleBadge");
 const clearSiteRuleButton = document.querySelector("#clearSiteRuleButton");
+const pageButtonToggle = document.querySelector("#pageButtonToggle");
+const releaseMemoryButton = document.querySelector("#releaseMemoryButton");
 const captureRow = document.querySelector("#captureRow");
 const captureThumb = document.querySelector("#captureThumb");
 const confidenceValue = document.querySelector("#confidenceValue");
@@ -31,6 +33,7 @@ const exportOfflineButton = document.querySelector("#exportOfflineButton");
 
 const PENDING_FEEDBACK_KEY = "pendingFeedback";
 const ENGINE_PREF_KEY = "enginePreference";
+const PAGE_BUTTON_ENABLED_KEY = "pageButtonEnabled";
 const OFFLINE_FEEDBACK_KEY = "offlineFeedbackQueue";
 const MAX_OFFLINE_FEEDBACK = 100;
 const NEXT_BUTTON_DEFAULT_TEXT = nextButton?.textContent || "答案正確／下一題";
@@ -324,8 +327,13 @@ function showPendingFeedback(pending, restoreStatus = true) {
 }
 
 async function probePythonService() {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 450) : null;
   try {
-    const response = await fetch(`${OCR_URL}/health`, { cache: "no-store" });
+    const response = await fetch(`${OCR_URL}/health`, {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
     const data = await response.json();
     if (!response.ok || !data.ok) throw new Error(data.error || "OCR 服務無法使用");
     if (!FeedbackHelpers.isSupportedApiVersion(data.version)) {
@@ -334,11 +342,35 @@ async function probePythonService() {
     return { ok: true, solvers: data.solvers || [], error: null };
   } catch (error) {
     return { ok: false, solvers: [], error: error?.message || "未偵測到本機 Python 服務" };
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
 }
 
 async function probeBrowserEngine() {
-  if (typeof chrome === "undefined" || typeof chrome.runtime?.sendMessage !== "function") {
+  if (typeof chrome === "undefined") {
+    return { ok: false, models: [], error: "目前環境未啟用離線 ONNX" };
+  }
+  // Zero-WASM fast check: inspect bundle_manifest.json directly without spawning Offscreen WASM.
+  if (typeof chrome.runtime?.getURL === "function" && typeof fetch === "function") {
+    try {
+      const manifestRes = await fetch(chrome.runtime.getURL("models/bundle_manifest.json"), { cache: "no-store" });
+      if (manifestRes.ok) {
+        const manifest = await manifestRes.json();
+        const bundles = manifest?.bundles || {};
+        const models = [];
+        if (bundles.official) models.push("official");
+        if (bundles.fusion_v7) models.push("fusion_v7");
+        if (!bundles.official && bundles.universal) models.push("universal");
+        if (models.length) {
+          return { ok: true, models, backend: "wasm", error: null };
+        }
+      }
+    } catch {
+      // Fall through to offscreen health check if manifest cannot be read directly.
+    }
+  }
+  if (typeof chrome.runtime?.sendMessage !== "function") {
     return { ok: false, models: [], error: "目前環境未啟用離線 ONNX" };
   }
   try {
@@ -403,6 +435,30 @@ async function disposeBrowserEngine() {
   }
 }
 
+async function refreshPageButtonToggle() {
+  if (!pageButtonToggle || !globalThis.chrome?.storage?.local) return;
+  try {
+    const stored = await chrome.storage.local.get(PAGE_BUTTON_ENABLED_KEY);
+    const enabled = stored?.[PAGE_BUTTON_ENABLED_KEY] !== false;
+    pageButtonToggle.textContent = enabled ? "頁面按鈕：開" : "頁面按鈕：關";
+  } catch {
+    pageButtonToggle.textContent = "頁面按鈕：開";
+  }
+}
+
+async function togglePageButton() {
+  if (!globalThis.chrome?.storage?.local) return;
+  try {
+    const stored = await chrome.storage.local.get(PAGE_BUTTON_ENABLED_KEY);
+    const next = stored?.[PAGE_BUTTON_ENABLED_KEY] === false;
+    await chrome.storage.local.set({ [PAGE_BUTTON_ENABLED_KEY]: next });
+    if (pageButtonToggle) pageButtonToggle.textContent = next ? "頁面按鈕：開" : "頁面按鈕：關";
+    setStatus(next ? "已開啟頁面浮動按鈕" : "已關閉頁面浮動按鈕", next ? "聚焦輸入框或載入頁面時會自動顯示按鈕。" : "仍可隨時使用 Ctrl+Shift+Y 或點圖示辨識。");
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 async function checkService() {
   const pref = await loadEnginePreference();
   let browserStatus = { ok: false, models: [], error: null };
@@ -413,11 +469,16 @@ async function checkService() {
     if (!pythonStatus.ok) {
       browserStatus = await probeBrowserEngine();
     }
+  } else if (pref === "browser") {
+    browserStatus = await probeBrowserEngine();
+    if (!browserStatus.ok) {
+      pythonStatus = await probePythonService();
+    }
   } else {
-    [browserStatus, pythonStatus] = await Promise.all([
-      probeBrowserEngine(),
-      probePythonService(),
-    ]);
+    browserStatus = await probeBrowserEngine();
+    if (!browserStatus.ok) {
+      pythonStatus = await probePythonService();
+    }
   }
   engineHealth = { browser: browserStatus, python: pythonStatus };
 
@@ -433,6 +494,7 @@ async function checkService() {
     activeEngineMode = pref === "browser" ? "browser" : "python";
   }
 
+  await refreshPageButtonToggle();
   await refreshOfflineExportButton();
   return applyActiveEngineUi();
 }
@@ -831,6 +893,13 @@ recognizeButton?.addEventListener("click", recognizeNextQuestion);
 pickerButton?.addEventListener("click", startElementPicker);
 enginePill?.addEventListener("click", () => {
   toggleEngineMode().catch(() => {});
+});
+pageButtonToggle?.addEventListener("click", () => {
+  togglePageButton().catch(() => {});
+});
+releaseMemoryButton?.addEventListener("click", async () => {
+  await disposeBrowserEngine();
+  setStatus("已釋放離線引擎記憶體", "下次辨識時將自動按需重新載入。");
 });
 clearSiteRuleButton?.addEventListener("click", async () => {
   if (!activeTabOrigin || !globalThis.SiteProfiles || !globalThis.chrome?.storage?.local) return;

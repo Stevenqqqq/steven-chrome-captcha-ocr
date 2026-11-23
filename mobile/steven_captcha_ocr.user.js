@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steven 驗證碼 OCR 助手（iPhone Safari 離線版）
 // @namespace    https://github.com/Stevenqqqq/steven-chrome-captcha-ocr
-// @version      2.0.0
+// @version      2.0.1
 // @description  在手機 Safari 本地以 ONNX WASM 離線辨識驗證碼並一鍵填入（不自動送出）
 // @author       Stevenqqqq
 // @match        http://*/*
@@ -1195,6 +1195,7 @@
 
   function createBrowserOcrRuntime({ ort, modelBaseUrl, fetchImpl = globalThis.fetch } = {}) {
     let initPromise = null;
+    let fusionLoadPromise = null;
     let inferenceQueue = Promise.resolve();
     let state = {
       ready: false,
@@ -1203,6 +1204,8 @@
       error: null,
       official: null,
       fusion: null,
+      fusionAvailable: false,
+      fusionFailed: false,
       universal: null,
     };
 
@@ -1226,6 +1229,36 @@
 
     async function createSession(modelBytes, providers) {
       return ort.InferenceSession.create(modelBytes, { executionProviders: providers });
+    }
+
+    async function loadFusionBundle(providers = ["wasm"]) {
+      const base = `${modelBaseUrl}/fusion_v7`;
+      const [config, directBytes, cropBytes] = await Promise.all([
+        fetchJson(`${base}/config.json`),
+        fetchBytes(`${base}/direct.onnx`),
+        fetchBytes(`${base}/crop.onnx`),
+      ]);
+      const directSession = await createSession(directBytes, providers);
+      const cropSession = await createSession(cropBytes, providers);
+      return { config, directSession, cropSession };
+    }
+
+    async function ensureFusionLoaded() {
+      if (state.fusion) return state.fusion;
+      if (!state.fusionAvailable || state.fusionFailed) return null;
+      if (fusionLoadPromise) return fusionLoadPromise;
+      fusionLoadPromise = (async () => {
+        try {
+          state.fusion = await loadFusionBundle(["wasm"]);
+          return state.fusion;
+        } catch {
+          state.fusionFailed = true;
+          return null;
+        } finally {
+          fusionLoadPromise = null;
+        }
+      })();
+      return fusionLoadPromise;
     }
 
     async function warmUp() {
@@ -1252,22 +1285,20 @@
             const session = await createSession(modelBytes, providers);
             state.official = { charsetMeta, session };
             loadedModels.push("official");
-          }
-
-          if (bundles.fusion_v7) {
-            const base = `${modelBaseUrl}/fusion_v7`;
-            const [config, directBytes, cropBytes] = await Promise.all([
-              fetchJson(`${base}/config.json`),
-              fetchBytes(`${base}/direct.onnx`),
-              fetchBytes(`${base}/crop.onnx`),
-            ]);
-            const directSession = await createSession(directBytes, providers);
-            const cropSession = await createSession(cropBytes, providers);
-            state.fusion = { config, directSession, cropSession };
+            if (bundles.fusion_v7) {
+              // Defer loading fusion_v7 (~45 MB WASM RAM) until a dark/blue 4-letter image needs it.
+              state.fusionAvailable = true;
+              state.fusionFailed = false;
+              loadedModels.push("fusion_v7");
+            }
+          } else if (bundles.fusion_v7) {
+            state.fusion = await loadFusionBundle(providers);
+            state.fusionAvailable = true;
             loadedModels.push("fusion_v7");
           }
 
-          if (bundles.universal) {
+          // Skip loading universal when official is already available (never called on the official path).
+          if (!bundles.official && bundles.universal) {
             const base = `${modelBaseUrl}/universal`;
             const [charsets, modelBytes] = await Promise.all([
               fetchJson(`${base}/charsets.json`),
@@ -1439,39 +1470,43 @@
         const protectDigits = officialHasDigits && charsetHint !== "letters";
         const lengthEligibleForFixed4 = expectedLength === 4
           || (expectedLength === null && /^[A-Z]{3,4}$/.test(best.answer || ""));
+        const canLoadFusion = Boolean(state.fusion || (state.fusionAvailable && !state.fusionFailed));
         const eligibleDarkFusion = isDarkBg
-          && Boolean(state.fusion)
+          && canLoadFusion
           && !caseSensitive
           && charsetHint !== "digits"
           && !protectDigits
           && lengthEligibleForFixed4;
         let modelUsed = "official";
         if (eligibleDarkFusion && (isBlueBg || best.answer.length !== 4 || best.confidence < 0.92)) {
-          const official4 = darkPrimaryTensor
-            ? decodeOfficialTensor(darkPrimaryTensor, {
-              expectedLength: 4,
-              lengthMode: "exact",
+          const fusionReady = state.fusion || await ensureFusionLoaded();
+          if (fusionReady) {
+            const official4 = darkPrimaryTensor
+              ? decodeOfficialTensor(darkPrimaryTensor, {
+                expectedLength: 4,
+                lengthMode: "exact",
+                charsetHint: "letters",
+                caseSensitive: false,
+                beamWidth: 32,
+                includeBeams: true,
+              }).raw_beams || []
+              : [];
+            const { directProbs, cropProbs, charset } = await runFusionFixed4Probs(rgbFull, width, height);
+            const joint = fuseOfficialAndFixed4(official4, directProbs, cropProbs, charset, {
               charsetHint: "letters",
-              caseSensitive: false,
-              beamWidth: 32,
-              includeBeams: true,
-            }).raw_beams || []
-            : [];
-          const { directProbs, cropProbs, charset } = await runFusionFixed4Probs(rgbFull, width, height);
-          const joint = fuseOfficialAndFixed4(official4, directProbs, cropProbs, charset, {
-            charsetHint: "letters",
-          });
-          const matches = alignedCharMatches(best.answer, joint.answer);
-          const cnnConf = joint.cnn_confidence ?? 0;
-          const adoptJoint = Boolean(joint.answer) && (
-            (isBlueBg && ((matches >= 2 && cnnConf >= 0.15) || (matches >= 1 && cnnConf >= 0.30) || (!best.answer && cnnConf >= 0.30) || (charsetHint === "letters" && cnnConf >= 0.45) || cnnConf >= 0.60))
-            || (!best.answer && cnnConf >= 0.30)
-            || (best.answer.length === 3 && matches >= 2 && cnnConf >= 0.15 && joint.confidence >= 0.75)
-            || (matches >= 2 && cnnConf >= 0.25 && joint.confidence >= 0.82)
-          );
-          if (adoptJoint) {
-            best = joint;
-            modelUsed = "official+fusion_v7";
+            });
+            const matches = alignedCharMatches(best.answer, joint.answer);
+            const cnnConf = joint.cnn_confidence ?? 0;
+            const adoptJoint = Boolean(joint.answer) && (
+              (isBlueBg && ((matches >= 2 && cnnConf >= 0.15) || (matches >= 1 && cnnConf >= 0.30) || (!best.answer && cnnConf >= 0.30) || (charsetHint === "letters" && cnnConf >= 0.45) || cnnConf >= 0.60))
+              || (!best.answer && cnnConf >= 0.30)
+              || (best.answer.length === 3 && matches >= 2 && cnnConf >= 0.15 && joint.confidence >= 0.75)
+              || (matches >= 2 && cnnConf >= 0.25 && joint.confidence >= 0.82)
+            );
+            if (adoptJoint) {
+              best = joint;
+              modelUsed = "official+fusion_v7";
+            }
           }
         }
 
@@ -1595,7 +1630,11 @@
       state.models = [];
       state.official = null;
       state.fusion = null;
+      state.fusionAvailable = false;
+      state.fusionFailed = false;
       state.universal = null;
+      initPromise = null;
+      fusionLoadPromise = null;
       for (const session of sessions) {
         if (typeof session.release === "function") {
           try {
@@ -1649,7 +1688,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
 
-  const IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+  const IDLE_TIMEOUT_MS = 90 * 1000;
   const VIRTUAL_MODEL_BASE_URL = "steven-userscript://models";
   const HOST_ID = "steven-ocr-mobile-host";
   const disposeHostSymbol = Symbol.for("steven-ocr-mobile.dispose");
@@ -2767,6 +2806,8 @@
     let observer = null;
     let userDragPos = null;
     let drag = null;
+    let viewportListening = false;
+    let positionRaf = null;
 
     // Choose one event family so a touch never starts two gestures.
     const usePointer = typeof win.PointerEvent === "function";
@@ -2839,6 +2880,39 @@
       return input.value === value;
     }
 
+    function attachViewportListeners() {
+      if (viewportListening) return;
+      viewportListening = true;
+      win.addEventListener("resize", schedulePosition);
+      win.addEventListener("scroll", schedulePosition, true);
+      win.visualViewport?.addEventListener("resize", schedulePosition);
+    }
+
+    function detachViewportListeners() {
+      if (!viewportListening) return;
+      viewportListening = false;
+      if (positionRaf !== null) {
+        win.cancelAnimationFrame?.(positionRaf);
+        positionRaf = null;
+      }
+      win.removeEventListener("resize", schedulePosition);
+      win.removeEventListener("scroll", schedulePosition, true);
+      win.visualViewport?.removeEventListener("resize", schedulePosition);
+    }
+
+    function schedulePosition() {
+      if (closed || !viewportListening) return;
+      if (typeof win.requestAnimationFrame === "function") {
+        if (positionRaf !== null) return;
+        positionRaf = win.requestAnimationFrame(() => {
+          positionRaf = null;
+          positionPill();
+        });
+      } else {
+        positionPill();
+      }
+    }
+
     function positionPill() {
       if (!host.isConnected && !host.parent) return;
       const input = currentTarget?.input;
@@ -2864,6 +2938,7 @@
       if (closed || !currentTarget) return;
       if (!host.parent && !host.isConnected) {
         doc.documentElement.append(host);
+        attachViewportListeners();
       }
       swapsRow.replaceChildren();
       swapsRow.hidden = true;
@@ -2989,6 +3064,7 @@
 
     function detachHost() {
       resetDrag();
+      detachViewportListeners();
       host.remove();
     }
 
@@ -3023,6 +3099,18 @@
 
     function scan({ force = false } = {}) {
       if (closed || mode === "busy") return;
+      if (!force && doc.visibilityState === "hidden") return;
+      if (!force && typeof doc.querySelector === "function" && !doc.querySelector("input")) {
+        if (currentTarget) {
+          currentTarget = null;
+          currentIdentity = "";
+          lastResult = null;
+          currentAnswer = "";
+          mode = "idle";
+          detachHost();
+        }
+        return;
+      }
       const found = detectCaptchaTarget(doc, detect);
       if (!found.ok) {
         if (!force && canPreserveCurrentTarget()) {
@@ -3057,11 +3145,11 @@
     }
 
     function scheduleScan() {
-      if (closed || scanTimer !== null) return;
+      if (closed || scanTimer !== null || doc.visibilityState === "hidden") return;
       scanTimer = win.setTimeout(() => {
         scanTimer = null;
         scan();
-      }, 250);
+      }, 400);
     }
 
     function setEngineStatus(text) {
@@ -3080,22 +3168,17 @@
       observer?.disconnect();
       observer = null;
       dragHandle.removeEventListener(startEvent, startDrag);
-      win.removeEventListener("resize", positionPill);
-      win.removeEventListener("scroll", positionPill, true);
-      win.visualViewport?.removeEventListener("resize", positionPill);
       doc.removeEventListener?.("focusin", scheduleScan, true);
       detachHost();
       onClose?.();
     }
 
     host[disposeHostSymbol] = close;
-    win.addEventListener("resize", positionPill);
-    win.addEventListener("scroll", positionPill, true);
-    win.visualViewport?.addEventListener("resize", positionPill);
     doc.addEventListener?.("focusin", scheduleScan, true);
 
     if (observeMutations && typeof win.MutationObserver === "function" && doc.body) {
       observer = new win.MutationObserver((mutations) => {
+        if (doc.visibilityState === "hidden") return;
         const relevant = mutations.some((m) => m.target !== host && !isInsideMobileHost(m.target));
         if (relevant) scheduleScan();
       });
@@ -3103,7 +3186,7 @@
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ["src", "style", "class"],
+        attributeFilter: ["src", "srcset"],
       });
     }
 

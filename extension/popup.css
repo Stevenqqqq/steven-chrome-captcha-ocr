@@ -176,6 +176,28 @@ h1 {
   background: color-mix(in srgb, var(--fg) 8%, transparent);
 }
 
+.util-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -6px 0 10px;
+  padding: 0 2px;
+}
+
+.util-btn {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--secondary);
+  font-size: 10.5px;
+}
+
+.util-btn:hover {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+  background: var(--secondary-hover);
+}
+
 /* Hero OCR Card */
 .hero-card {
   background: var(--well);

@@ -798,6 +798,7 @@
 
   function createBrowserOcrRuntime({ ort, modelBaseUrl, fetchImpl = globalThis.fetch } = {}) {
     let initPromise = null;
+    let fusionLoadPromise = null;
     let inferenceQueue = Promise.resolve();
     let state = {
       ready: false,
@@ -806,6 +807,8 @@
       error: null,
       official: null,
       fusion: null,
+      fusionAvailable: false,
+      fusionFailed: false,
       universal: null,
     };
 
@@ -829,6 +832,36 @@
 
     async function createSession(modelBytes, providers) {
       return ort.InferenceSession.create(modelBytes, { executionProviders: providers });
+    }
+
+    async function loadFusionBundle(providers = ["wasm"]) {
+      const base = `${modelBaseUrl}/fusion_v7`;
+      const [config, directBytes, cropBytes] = await Promise.all([
+        fetchJson(`${base}/config.json`),
+        fetchBytes(`${base}/direct.onnx`),
+        fetchBytes(`${base}/crop.onnx`),
+      ]);
+      const directSession = await createSession(directBytes, providers);
+      const cropSession = await createSession(cropBytes, providers);
+      return { config, directSession, cropSession };
+    }
+
+    async function ensureFusionLoaded() {
+      if (state.fusion) return state.fusion;
+      if (!state.fusionAvailable || state.fusionFailed) return null;
+      if (fusionLoadPromise) return fusionLoadPromise;
+      fusionLoadPromise = (async () => {
+        try {
+          state.fusion = await loadFusionBundle(["wasm"]);
+          return state.fusion;
+        } catch {
+          state.fusionFailed = true;
+          return null;
+        } finally {
+          fusionLoadPromise = null;
+        }
+      })();
+      return fusionLoadPromise;
     }
 
     async function warmUp() {
@@ -855,22 +888,20 @@
             const session = await createSession(modelBytes, providers);
             state.official = { charsetMeta, session };
             loadedModels.push("official");
-          }
-
-          if (bundles.fusion_v7) {
-            const base = `${modelBaseUrl}/fusion_v7`;
-            const [config, directBytes, cropBytes] = await Promise.all([
-              fetchJson(`${base}/config.json`),
-              fetchBytes(`${base}/direct.onnx`),
-              fetchBytes(`${base}/crop.onnx`),
-            ]);
-            const directSession = await createSession(directBytes, providers);
-            const cropSession = await createSession(cropBytes, providers);
-            state.fusion = { config, directSession, cropSession };
+            if (bundles.fusion_v7) {
+              // Defer loading fusion_v7 (~45 MB WASM RAM) until a dark/blue 4-letter image needs it.
+              state.fusionAvailable = true;
+              state.fusionFailed = false;
+              loadedModels.push("fusion_v7");
+            }
+          } else if (bundles.fusion_v7) {
+            state.fusion = await loadFusionBundle(providers);
+            state.fusionAvailable = true;
             loadedModels.push("fusion_v7");
           }
 
-          if (bundles.universal) {
+          // Skip loading universal when official is already available (never called on the official path).
+          if (!bundles.official && bundles.universal) {
             const base = `${modelBaseUrl}/universal`;
             const [charsets, modelBytes] = await Promise.all([
               fetchJson(`${base}/charsets.json`),
@@ -1042,39 +1073,43 @@
         const protectDigits = officialHasDigits && charsetHint !== "letters";
         const lengthEligibleForFixed4 = expectedLength === 4
           || (expectedLength === null && /^[A-Z]{3,4}$/.test(best.answer || ""));
+        const canLoadFusion = Boolean(state.fusion || (state.fusionAvailable && !state.fusionFailed));
         const eligibleDarkFusion = isDarkBg
-          && Boolean(state.fusion)
+          && canLoadFusion
           && !caseSensitive
           && charsetHint !== "digits"
           && !protectDigits
           && lengthEligibleForFixed4;
         let modelUsed = "official";
         if (eligibleDarkFusion && (isBlueBg || best.answer.length !== 4 || best.confidence < 0.92)) {
-          const official4 = darkPrimaryTensor
-            ? decodeOfficialTensor(darkPrimaryTensor, {
-              expectedLength: 4,
-              lengthMode: "exact",
+          const fusionReady = state.fusion || await ensureFusionLoaded();
+          if (fusionReady) {
+            const official4 = darkPrimaryTensor
+              ? decodeOfficialTensor(darkPrimaryTensor, {
+                expectedLength: 4,
+                lengthMode: "exact",
+                charsetHint: "letters",
+                caseSensitive: false,
+                beamWidth: 32,
+                includeBeams: true,
+              }).raw_beams || []
+              : [];
+            const { directProbs, cropProbs, charset } = await runFusionFixed4Probs(rgbFull, width, height);
+            const joint = fuseOfficialAndFixed4(official4, directProbs, cropProbs, charset, {
               charsetHint: "letters",
-              caseSensitive: false,
-              beamWidth: 32,
-              includeBeams: true,
-            }).raw_beams || []
-            : [];
-          const { directProbs, cropProbs, charset } = await runFusionFixed4Probs(rgbFull, width, height);
-          const joint = fuseOfficialAndFixed4(official4, directProbs, cropProbs, charset, {
-            charsetHint: "letters",
-          });
-          const matches = alignedCharMatches(best.answer, joint.answer);
-          const cnnConf = joint.cnn_confidence ?? 0;
-          const adoptJoint = Boolean(joint.answer) && (
-            (isBlueBg && ((matches >= 2 && cnnConf >= 0.15) || (matches >= 1 && cnnConf >= 0.30) || (!best.answer && cnnConf >= 0.30) || (charsetHint === "letters" && cnnConf >= 0.45) || cnnConf >= 0.60))
-            || (!best.answer && cnnConf >= 0.30)
-            || (best.answer.length === 3 && matches >= 2 && cnnConf >= 0.15 && joint.confidence >= 0.75)
-            || (matches >= 2 && cnnConf >= 0.25 && joint.confidence >= 0.82)
-          );
-          if (adoptJoint) {
-            best = joint;
-            modelUsed = "official+fusion_v7";
+            });
+            const matches = alignedCharMatches(best.answer, joint.answer);
+            const cnnConf = joint.cnn_confidence ?? 0;
+            const adoptJoint = Boolean(joint.answer) && (
+              (isBlueBg && ((matches >= 2 && cnnConf >= 0.15) || (matches >= 1 && cnnConf >= 0.30) || (!best.answer && cnnConf >= 0.30) || (charsetHint === "letters" && cnnConf >= 0.45) || cnnConf >= 0.60))
+              || (!best.answer && cnnConf >= 0.30)
+              || (best.answer.length === 3 && matches >= 2 && cnnConf >= 0.15 && joint.confidence >= 0.75)
+              || (matches >= 2 && cnnConf >= 0.25 && joint.confidence >= 0.82)
+            );
+            if (adoptJoint) {
+              best = joint;
+              modelUsed = "official+fusion_v7";
+            }
           }
         }
 
@@ -1198,7 +1233,11 @@
       state.models = [];
       state.official = null;
       state.fusion = null;
+      state.fusionAvailable = false;
+      state.fusionFailed = false;
       state.universal = null;
+      initPromise = null;
+      fusionLoadPromise = null;
       for (const session of sessions) {
         if (typeof session.release === "function") {
           try {

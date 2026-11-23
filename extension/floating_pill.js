@@ -141,6 +141,7 @@
     if (!doc?.documentElement || typeof data?.answer !== "string" || !data.answer.trim()) return null;
     const win = doc.defaultView || root;
     const input = findInput(doc, data.inputSelectorOrToken, detect);
+    doc.getElementById("steven-ocr-page-button-host")?.[Symbol.for("steven-ocr-page-button.dispose")]?.();
     doc.getElementById(HOST_ID)?.[disposeHost]?.();
     const autoHideMs = Number.isFinite(data.autoHideMs) && data.autoHideMs >= 0 ? data.autoHideMs : 3500;
     const candidates = [{ answer: data.answer, confidence: data.confidence }, ...(data.candidates || [])];

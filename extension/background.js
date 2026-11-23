@@ -7,8 +7,108 @@
   const DEFAULT_POPUP = "popup.html";
   const SHORTCUT_POPUP = "shortcut_popup.html";
   const OFFSCREEN_DOCUMENT = "offscreen.html";
+  const PYTHON_OCR_URL = "http://127.0.0.1:8765";
+  const ENGINE_PREF_KEY = "enginePreference";
 
   let creatingOffscreen = null;
+
+  function dataUrlToBlob(dataUrl) {
+    if (typeof dataUrl !== "string") throw new Error("圖片資料無效");
+    const match = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/i.exec(dataUrl);
+    if (!match) throw new Error("不支援的圖片格式");
+    const mime = match[1].toLowerCase();
+    const binary = atob(match[2].replace(/\s+/g, ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  function buildPythonRecognizeUrl(baseUrl, options = {}) {
+    const url = new URL("/recognize", baseUrl);
+    if (Number.isInteger(options.expectedLength) && options.expectedLength >= 1 && options.expectedLength <= 12) {
+      url.searchParams.set("expectedLength", String(options.expectedLength));
+    }
+    if (options.lengthMode === "exact" || options.lengthMode === "max") {
+      url.searchParams.set("lengthMode", options.lengthMode);
+    }
+    if (["digits", "letters", "alphanumeric"].includes(options.charsetHint)) {
+      url.searchParams.set("charsetHint", options.charsetHint);
+    }
+    if (options.caseSensitive) {
+      url.searchParams.set("caseSensitive", "1");
+    }
+    return url.toString();
+  }
+
+  async function callPythonRecognize(payload, fetchImpl = globalThis.fetch) {
+    const blob = dataUrlToBlob(payload.imageDataUrl);
+    const url = buildPythonRecognizeUrl(PYTHON_OCR_URL, payload);
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), 3500) : null;
+    try {
+      const response = await fetchImpl(url, {
+        method: "POST",
+        headers: { "Content-Type": blob.type || "image/png" },
+        body: blob,
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      const data = await response.json();
+      if (!response.ok || !data?.ok) throw new Error(data?.error || "本機 Python OCR 辨識失敗");
+      return data;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  }
+
+  async function recognizeFromPage(chromeApi, payload, fetchImpl = globalThis.fetch) {
+    let pref = "auto";
+    try {
+      const stored = await chromeApi?.storage?.local?.get?.(ENGINE_PREF_KEY);
+      if (["auto", "browser", "python"].includes(stored?.[ENGINE_PREF_KEY])) {
+        pref = stored[ENGINE_PREF_KEY];
+      }
+    } catch {
+      // Default to auto if storage is unavailable.
+    }
+
+    const runBrowser = async () => {
+      const result = await forwardToOffscreen(chromeApi, {
+        type: "OCR_RECOGNIZE",
+        requestId: payload.requestId,
+        imageDataUrl: payload.imageDataUrl,
+        expectedLength: payload.expectedLength,
+        lengthMode: payload.lengthMode,
+        charsetHint: payload.charsetHint,
+        caseSensitive: payload.caseSensitive,
+      });
+      if (!result?.ok) throw new Error(result?.error || "離線 ONNX 辨識失敗");
+      return result;
+    };
+
+    const runPython = () => callPythonRecognize(payload, fetchImpl);
+
+    if (pref === "python") {
+      try {
+        return await runPython();
+      } catch (pythonErr) {
+        try {
+          return await runBrowser();
+        } catch {
+          throw pythonErr;
+        }
+      }
+    }
+
+    try {
+      return await runBrowser();
+    } catch (browserErr) {
+      try {
+        return await runPython();
+      } catch {
+        throw browserErr;
+      }
+    }
+  }
 
   async function openShortcutPopup(chromeApi) {
     await chromeApi.action.setPopup({ popup: SHORTCUT_POPUP });
@@ -113,6 +213,12 @@
           .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
         return true;
       }
+      if (message?.type === "OCR_PAGE_RECOGNIZE") {
+        recognizeFromPage(chromeApi, message)
+          .then(sendResponse)
+          .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+        return true;
+      }
       return false;
     });
   }
@@ -129,6 +235,7 @@
     ensureOffscreenDocument,
     disposeOffscreenDocument,
     forwardToOffscreen,
+    recognizeFromPage,
     openShortcutPopup,
     registerOffscreenBridge,
     registerShortcut,

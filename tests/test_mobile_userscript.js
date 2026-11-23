@@ -242,16 +242,24 @@ test("createMobileOcrEngine warms up via virtual fetch, falls back to official-o
   assert.equal(res.ok, true);
   assert.equal(res.answer, "A7KP");
   assert.equal(res.model, "official");
-  // 1st attempt created official before fusion_v7 threw & disposed it; 2nd attempt created official cleanly.
-  assert.equal(createdSessions, 2);
-  assert.equal(disposedSessions, 1);
+  // Lazy fusion_v7: only the official session is created for light images; fusion_v7 failure on blue falls back cleanly.
+  assert.equal(createdSessions, 1);
+  assert.equal(disposedSessions, 0);
+  const blueRgba = new Uint8Array(40 * 16 * 4);
+  for (let i = 0; i < 40 * 16; i += 1) {
+    blueRgba[i * 4] = 2; blueRgba[i * 4 + 1] = 108; blueRgba[i * 4 + 2] = 223; blueRgba[i * 4 + 3] = 255;
+  }
+  const blueRes = await engine.recognizeRgba({ rgba: blueRgba, width: 40, height: 16, expectedLength: 4 });
+  assert.equal(blueRes.ok, true);
+  assert.equal(blueRes.answer, "A7KP");
+  assert.equal(blueRes.model, "official");
   assert.equal(engine.getState().inFlight, 0);
   assert.equal(engine.getState().hasIdleTimer, true);
-  assert.equal(scheduledMs, 120_000);
+  assert.equal(scheduledMs, 90_000);
 
   // Trigger idle timeout and verify session is released.
   await scheduledFn();
-  assert.equal(disposedSessions, 2);
+  assert.equal(disposedSessions, 1);
   assert.equal(engine.getState().hasRuntime, false);
   assert.ok(clearedTimers >= 0);
 });
@@ -623,4 +631,29 @@ test("built mobile/steven_captcha_ocr.user.js contains valid userscript metadata
   assert.match(content, /__STEVEN_OCR_EMBEDDED_ASSETS__/);
   assert.match(content, /officialCharset/);
   assert.match(content, /fusionConfig/);
+});
+
+test("mobile MutationObserver ignores style/class attribute churn and detaches viewport listeners when unmounted", () => {
+  const { doc, win } = createMobileDomFixture();
+  let observedOpts = null;
+  win.MutationObserver = class {
+    observe(_target, opts) { observedOpts = opts; }
+    disconnect() {}
+  };
+  const added = [];
+  const removed = [];
+  const origAdd = win.addEventListener.bind(win);
+  const origRemove = win.removeEventListener.bind(win);
+  win.addEventListener = (type, fn, opts) => { added.push(type); origAdd(type, fn, opts); };
+  win.removeEventListener = (type, fn, opts) => { removed.push(type); origRemove(type, fn, opts); };
+
+  const ui = mobile.mountMobileCaptchaUi({ doc, detect, engine: {}, observeMutations: true });
+  assert.deepEqual(observedOpts.attributeFilter, ["src", "srcset"]);
+  assert.ok(added.includes("scroll"));
+  assert.ok(added.includes("resize"));
+
+  ui.dismiss();
+  assert.ok(removed.includes("scroll"));
+  assert.ok(removed.includes("resize"));
+  ui.close();
 });

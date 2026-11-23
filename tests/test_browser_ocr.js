@@ -413,3 +413,95 @@ test("runtime fuses official+fusion_v7 on blue 4-letter CAPTCHA when official dr
   assert.equal(resDigits.answer, "482");
   assert.equal(resDigits.model, "official");
 });
+
+test("runtime lazily defers fusion_v7 on light images and skips dead universal when official is present", async () => {
+  const cols = DEFAULT_CHARSET.length;
+  const asciiEntries = DEFAULT_CHARSET.split("").map((char, i) => ({ index: i + 1, char }));
+  const fetchedUrls = [];
+  let createdSessions = 0;
+
+  const makeOfficialLogits = (word) => {
+    const T = word.length * 2;
+    const C = cols + 2;
+    const arr = new Float32Array(T * C).fill(-8);
+    word.split("").forEach((ch, idx) => {
+      arr[(idx * 2) * C + (DEFAULT_CHARSET.indexOf(ch) + 1)] = 6;
+      arr[(idx * 2 + 1) * C + 0] = 6;
+    });
+    return { data: arr, dims: [T, 1, C] };
+  };
+  const fakeOrt = {
+    Tensor: class Tensor {
+      constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; }
+    },
+    InferenceSession: {
+      async create() {
+        createdSessions += 1;
+        return {
+          inputNames: ["input1"],
+          outputNames: ["output"],
+          async run() { return { output: makeOfficialLogits("707694") }; },
+        };
+      },
+    },
+  };
+  const fakeFetch = async (url) => {
+    fetchedUrls.push(url);
+    if (url.endsWith("bundle_manifest.json")) {
+      return { ok: true, json: async () => ({ bundles: { official: {}, fusion_v7: {}, universal: {} } }) };
+    }
+    if (url.endsWith("charset.json")) {
+      return { ok: true, json: async () => ({ blank_index: 0, target_height: 64, ascii_entries: asciiEntries }) };
+    }
+    return { ok: true, arrayBuffer: async () => new Uint8Array(8).buffer };
+  };
+
+  const runtime = createBrowserOcrRuntime({ ort: fakeOrt, modelBaseUrl: "mem://models", fetchImpl: fakeFetch });
+  const lightRgba = new Uint8Array(40 * 20 * 4).fill(245);
+  const res = await runtime.recognizeRgba({
+    rgba: lightRgba, width: 40, height: 20, expectedLength: 6, lengthMode: "exact", charsetHint: "digits",
+  });
+  assert.equal(res.answer, "707694");
+  assert.equal(createdSessions, 1, "Only official session should be loaded for light-background images");
+  assert.equal(fetchedUrls.some((u) => u.includes("fusion_v7")), false);
+  assert.equal(fetchedUrls.some((u) => u.includes("universal")), false);
+});
+
+test("offscreen controller OCR_DISPOSE refuses when busy and disposes cleanly when idle", async () => {
+  const { createOffscreenController, IDLE_TIMEOUT_MS } = require("../extension/offscreen.js");
+  assert.equal(IDLE_TIMEOUT_MS, 90_000);
+  let disposed = 0;
+  let closed = 0;
+  let releasePending;
+  const timers = [];
+  const controller = createOffscreenController({
+    runtime: {
+      async recognizeRgba() {
+        await new Promise((resolve) => { releasePending = resolve; });
+        return { ok: true, answer: "A7KP" };
+      },
+      async dispose() { disposed += 1; },
+    },
+    decodeDataUrl: async () => ({ rgba: new Uint8Array(16), width: 2, height: 2 }),
+    onClose: () => { closed += 1; },
+    setTimer: (fn) => { timers.push(fn); return timers.length; },
+    clearTimer: () => {},
+  });
+
+  const busyPromise = controller.handleMessage({ type: "OCR_RECOGNIZE", imageDataUrl: "data:image/png;base64,", requestId: "b1" });
+  await new Promise((r) => setImmediate(r));
+  const refused = await controller.handleMessage({ type: "OCR_DISPOSE", requestId: "d1" });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.busy, true);
+  assert.equal(disposed, 0);
+
+  releasePending();
+  await busyPromise;
+
+  const ok = await controller.handleMessage({ type: "OCR_DISPOSE", requestId: "d2" });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.disposed, true);
+  assert.equal(disposed, 1);
+  timers[timers.length - 1]();
+  assert.equal(closed, 1);
+});

@@ -5,7 +5,7 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function (root) {
   "use strict";
 
-  const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+  const IDLE_TIMEOUT_MS = 90 * 1000;
 
   function createOffscreenController({
     runtime,
@@ -142,7 +142,7 @@
     const ort = root.ort;
     if (ort?.env?.wasm && chrome.runtime?.getURL) {
       ort.env.wasm.wasmPaths = chrome.runtime.getURL("vendor/ort/");
-      ort.env.wasm.numThreads = root.crossOriginIsolated && typeof SharedArrayBuffer !== "undefined" ? 2 : 1;
+      ort.env.wasm.numThreads = 1;
       ort.env.wasm.proxy = false;
     }
     const modelBaseUrl = chrome.runtime?.getURL ? chrome.runtime.getURL("models") : "./models";

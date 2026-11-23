@@ -392,11 +392,22 @@
     const container = input.closest?.(
       "tr, td, .form-group, .field, .input-group, .form-row, .control-group, .form-item",
     );
-    if (container) return container.textContent || "";
-    const parent = input.parentElement;
-    if (!parent || ["FORM", "BODY", "HTML"].includes(parent.tagName)) return "";
-    const text = parent.textContent || "";
-    return text.length <= 300 ? text : "";
+    if (container) {
+      const ownText = (container.textContent || "").trim();
+      if (ownText) return ownText;
+      const outer = container.parentElement;
+      if (outer && !["FORM", "BODY", "HTML"].includes(outer.tagName)) {
+        const outerText = (outer.textContent || "").trim();
+        if (outerText.length <= 300) return outerText;
+      }
+    }
+    let parent = input.parentElement;
+    for (let depth = 0; depth < 2 && parent && !["FORM", "BODY", "HTML"].includes(parent.tagName); depth += 1) {
+      const text = (parent.textContent || "").trim();
+      if (text && text.length <= 300) return text;
+      parent = parent.parentElement;
+    }
+    return "";
   }
 
   function rectDistance(first, second) {

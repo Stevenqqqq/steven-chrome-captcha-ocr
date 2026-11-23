@@ -1226,6 +1226,7 @@ class OcrEngine:
         should_run_fusion = fusion_eligible and (
             expected_length == 4
             or (len(baseline_answer) == 4 and baseline_answer.isalpha())
+            or (expected_length is None and len(baseline_answer) == 3 and baseline_answer.isalpha())
         )
         if should_run_fusion:
             try:
@@ -1242,6 +1243,10 @@ class OcrEngine:
                     if fused.get("fused_top_probability") is not None:
                         result["confidence"] = round(float(fused["fused_top_probability"]), 4)
                     final_answer = str(result.get("answer") or baseline_answer)
+                    if expected_length is not None and length_mode != "unknown":
+                        result["length_match"] = _matches_length_constraint(
+                            final_answer, expected_length, length_mode
+                        )
                     if final_answer != baseline_answer:
                         top_list = [
                             item for item in result.get("top_candidates") or []

@@ -113,18 +113,27 @@
 
     const digitsAtom = String.raw`(?:\\d|\[[0-9-]+\]|[0-9])`;
     const lettersAtom = String.raw`(?:\[[A-Za-z-]+\]|[A-Za-z])`;
+    const alnumAtom = String.raw`(?:\\w|\[(?:0-9A-Za-z|A-Za-z0-9|a-zA-Z0-9|0-9a-zA-Z|A-Z0-9|0-9A-Z|a-z0-9|0-9a-z-)+\])`;
     const isPatternFor = (characterAtom) => new RegExp(
       String.raw`^\^?(?:\((?:\?:)?${characterAtom}\)|${characterAtom})(?:[+*?]|\{\d+(?:,\d*)?\})?\$?$`,
     ).test(regex);
     const text = [labelText, metadata, localContext].filter(Boolean).join(" ");
-    const mixedText = /英數|英数|字母與數字|字母和數字|字母与数字|alphanumeric/i.test(text)
-      || (/(?:[a-z]*letters?|alphabetic|字母|英文)/i.test(text) && /數字|数字|digits?|numeric/i.test(text));
+    const positiveLetterText = text.replace(
+      /(?:請勿|不要|不可|勿)\s*(?:輸入)?\s*英文|\b(?:no|not|without)\s+letters?\b/gi,
+      "",
+    );
+    const mixedText = isPatternFor(alnumAtom)
+      || /英數|英数|字母與數字|字母和數字|字母与数字|alphanumeric/i.test(text)
+      || (/(?:[a-z]*letters?|alphabetic|字母|英文)/i.test(positiveLetterText) && /數字|数字|digits?|numeric/i.test(text));
     const digitsText = /純[數数]字|[數数]字[驗验][證证][碼码]|\bdigits? only\b|\b\d+\s+digits?\b|\bnumeric\b/i.test(text);
     const explicitDigits = /^(?:number)$/i.test(type || "") || /^(?:numeric)$/i.test(inputMode || "");
     let charsetHint = "alphanumeric";
     if (explicitDigits || isPatternFor(digitsAtom) || (!mixedText && digitsText)) {
       charsetHint = "digits";
-    } else if (isPatternFor(lettersAtom) || (!mixedText && /純英文|英文字母|letters? only/i.test(text))) {
+    } else if (
+      isPatternFor(lettersAtom)
+      || (!mixedText && /純英文|英文字母|(?:請輸入|輸入|為)英文|英文\s*(?:驗證碼|验证码)|letters? only|\b(?:enter|input)\s+letters\b/i.test(positiveLetterText))
+    ) {
       charsetHint = "letters";
     }
     const caseSensitive = /(?:區分大小寫|区分大小写|\bcase[- ]sensitive\b)/i.test(

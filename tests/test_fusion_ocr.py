@@ -205,6 +205,51 @@ class LightSelectionTests(unittest.TestCase):
         self.assertEqual(result["fusion_model"], "v4+v6+v7")
         self.assertNotIn("selection_strategy", result)
 
+    def test_dark_fusion_rescues_3_letter_baseline_and_injects_direct_crop_top1(self):
+        fusion = self.make_fusion()
+        fusion.charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        fusion.alpha = 6.0
+        fusion.beta = 6.0
+        fusion.threshold = 0.5
+        dark_variants = [
+            ("dark_primary", {"probabilities": [], "charset": [""], "text": "LMR"}),
+        ]
+        # Official beam only contains a wrong 4-letter candidate ("ILMR"), missing "TLMR".
+        candidate_rows = [{"answer": "ILMR", "relative_probability": 1.0}]
+        direct = np.full((4, 36), 1e-4, dtype=np.float32)
+        crop = np.full((4, 36), 1e-4, dtype=np.float32)
+        for position, character in enumerate("TLMR"):
+            direct[position, fusion.charset.index(character)] = 0.95
+            crop[position, fusion.charset.index(character)] = 0.95
+        image_stream = BytesIO()
+        Image.new("RGB", (40, 20), (2, 108, 223)).save(image_stream, format="PNG")
+        with patch.object(fusion_ocr, "ctc_prefix_beam", return_value=candidate_rows), \
+                patch.object(fusion, "_reranker", side_effect=lambda feats: np.zeros(len(feats), dtype=np.float32)), \
+                patch.object(fusion, "_direct_probabilities", return_value=direct), \
+                patch.object(fusion, "_crop_probabilities", return_value=crop):
+            result = fusion.recognize(image_stream.getvalue(), "LMR", dark_variants)
+
+        self.assertEqual(result["answer"], "TLMR")
+        self.assertEqual(result["fusion_candidate_count"], 2)
+
+    def test_dark_fusion_rejects_uniform_cnn_guess_when_official_beams_are_empty(self):
+        fusion = self.make_fusion()
+        fusion.charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        fusion.alpha = 6.0
+        fusion.beta = 6.0
+        fusion.threshold = 0.5
+        dark_variants = [("dark_primary", {"probabilities": [], "charset": [""], "text": "LMR"})]
+        uniform = np.full((4, 36), 1.0 / 36.0, dtype=np.float32)
+        image_stream = BytesIO()
+        Image.new("RGB", (40, 20), (2, 108, 223)).save(image_stream, format="PNG")
+        with patch.object(fusion_ocr, "ctc_prefix_beam", return_value=[]), \
+                patch.object(fusion, "_reranker", side_effect=lambda feats: np.zeros(len(feats), dtype=np.float32)), \
+                patch.object(fusion, "_direct_probabilities", return_value=uniform), \
+                patch.object(fusion, "_crop_probabilities", return_value=uniform):
+            result = fusion.recognize(image_stream.getvalue(), "LMR", dark_variants)
+
+        self.assertIsNone(result)
+
 
 class BundleValidationTests(unittest.TestCase):
     def test_partial_bundle_rejects_missing_light_npz(self):

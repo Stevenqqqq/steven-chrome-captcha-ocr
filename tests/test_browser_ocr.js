@@ -6,12 +6,15 @@ const {
   rgbToChwFloat32,
   rgbToGrayscaleBytes,
   computeMedianLuminance,
+  isBlueBackground,
+  alignedCharMatches,
   enhanceDarkPrimaryRgb,
   resizeGrayscaleUnit01,
   cropHorizontalSegment,
   softmaxRows,
   ctcPrefixBeamAscii,
   fuseFixed4Probabilities,
+  fuseOfficialAndFixed4,
   ctcGreedyDecode,
   createBrowserOcrRuntime,
 } = require("../extension/browser_ocr.js");
@@ -269,4 +272,144 @@ test("offscreen controller releases sessions and closes after idle timeout witho
   assert.equal(disposed, 1);
   assert.equal(closed, 1);
   assert.equal(controller.getState().closing, true);
+});
+
+test("isBlueBackground, alignedCharMatches, and fuseOfficialAndFixed4 rescue 3-letter drops and balance official+CNN", () => {
+  const blueRgb = new Uint8Array(4 * 4 * 3);
+  const grayRgb = new Uint8Array(4 * 4 * 3);
+  for (let i = 0; i < 16; i++) {
+    blueRgb[i * 3] = 2; blueRgb[i * 3 + 1] = 108; blueRgb[i * 3 + 2] = 223;
+    grayRgb[i * 3] = 50; grayRgb[i * 3 + 1] = 50; grayRgb[i * 3 + 2] = 50;
+  }
+  assert.equal(isBlueBackground(blueRgb, 4, 4), true);
+  assert.equal(isBlueBackground(grayRgb, 4, 4), false);
+
+  assert.equal(alignedCharMatches("BUE", "BUTE"), 3);
+  assert.equal(alignedCharMatches("YEG", "YEGL"), 3);
+  assert.equal(alignedCharMatches("LMR", "TLMR"), 3);
+  assert.equal(alignedCharMatches("ABCD", "ABXD"), 3);
+  assert.equal(alignedCharMatches("AB", "ABCD"), 0);
+
+  const cols = DEFAULT_CHARSET.length;
+  const direct = new Float32Array(4 * cols).fill(1e-4);
+  const crop = new Float32Array(4 * cols).fill(1e-4);
+  const setP = (arr, pos, ch, p) => { arr[pos * cols + DEFAULT_CHARSET.indexOf(ch)] = p; };
+  // Suppose direct+crop slightly favors JMYJ over JMXJ, while official is strongly confident in JMXJ.
+  for (const arr of [direct, crop]) {
+    setP(arr, 0, "J", 0.98);
+    setP(arr, 1, "M", 0.98);
+    setP(arr, 2, "Y", 0.55);
+    setP(arr, 2, "X", 0.42);
+    setP(arr, 3, "J", 0.98);
+  }
+  const joint = fuseOfficialAndFixed4(
+    [{ text: "JMXJ", logProb: -0.03 }, { text: "JMYJ", logProb: -5.9 }],
+    direct,
+    crop,
+    DEFAULT_CHARSET,
+    { charsetHint: "letters" },
+  );
+  assert.equal(joint.answer, "JMXJ");
+  assert.equal(joint.top_candidates[0].answer, "JMXJ");
+  assert.equal(joint.top_candidates[1].answer, "JMYJ");
+  assert.ok(joint.confidence > 0.9);
+
+  // Missing word must never outrank a retained official beam whose logProb is below -12.
+  const direct2 = new Float32Array(4 * cols).fill(1e-4);
+  const crop2 = new Float32Array(4 * cols).fill(1e-4);
+  for (const arr of [direct2, crop2]) {
+    setP(arr, 0, "A", 0.95);
+    setP(arr, 1, "B", 0.95);
+    setP(arr, 2, "C", 0.95);
+    setP(arr, 3, "D", 0.60);
+    setP(arr, 3, "Z", 0.35);
+  }
+  const jointLowBeam = fuseOfficialAndFixed4(
+    [{ text: "ABCD", logProb: -20.0 }],
+    direct2,
+    crop2,
+    DEFAULT_CHARSET,
+    { charsetHint: "letters" },
+  );
+  assert.equal(jointLowBeam.answer, "ABCD");
+});
+
+test("runtime fuses official+fusion_v7 on blue 4-letter CAPTCHA when official drops a letter, while protecting dark digits", async () => {
+  const cols = DEFAULT_CHARSET.length;
+  const asciiEntries = DEFAULT_CHARSET.split("").map((char, i) => ({ index: i + 1, char }));
+  const makeOfficialLogits = (word) => {
+    const T = word.length * 2;
+    const C = cols + 2;
+    const arr = new Float32Array(T * C).fill(-8);
+    word.split("").forEach((ch, idx) => {
+      arr[(idx * 2) * C + (DEFAULT_CHARSET.indexOf(ch) + 1)] = 6;
+      arr[(idx * 2 + 1) * C + 0] = 6;
+    });
+    return { data: arr, dims: [T, 1, C] };
+  };
+  const makeFixed4Logits = (word) => {
+    const arr = new Float32Array(4 * cols).fill(-4);
+    word.split("").forEach((ch, pos) => {
+      arr[pos * cols + DEFAULT_CHARSET.indexOf(ch)] = 6;
+    });
+    return { data: arr, dims: [1, 4, cols] };
+  };
+
+  let officialWord = "LMR"; // dropped 'T' from TLMR
+  let fusionWord = "TLMR";
+  let sessionCount = 0;
+  const fakeOrt = {
+    Tensor: class Tensor {
+      constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; }
+    },
+    InferenceSession: {
+      async create() {
+        const id = sessionCount++;
+        if (id === 0) {
+          return {
+            inputNames: ["input1"], outputNames: ["output"],
+            async run() { return { output: makeOfficialLogits(officialWord) }; },
+          };
+        }
+        return {
+          inputNames: ["image"], outputNames: ["logits"],
+          async run() { return { logits: makeFixed4Logits(fusionWord) }; },
+        };
+      },
+    },
+  };
+  const fakeFetch = async (url) => {
+    if (url.endsWith("bundle_manifest.json")) {
+      return { ok: true, json: async () => ({ bundles: { official: {}, fusion_v7: {} } }) };
+    }
+    if (url.endsWith("charset.json")) {
+      return { ok: true, json: async () => ({ blank_index: 0, target_height: 64, ascii_entries: asciiEntries }) };
+    }
+    if (url.endsWith("config.json")) {
+      return { ok: true, json: async () => ({ charset: DEFAULT_CHARSET, alpha: 6, beta: 6, direct_image_size: [12, 20], crop_image_size: [12, 8], crop_margin: 0.32 }) };
+    }
+    return { ok: true, arrayBuffer: async () => new Uint8Array(8).buffer };
+  };
+
+  const runtime = createBrowserOcrRuntime({ ort: fakeOrt, modelBaseUrl: "mem://models", fetchImpl: fakeFetch });
+  const blueRgba = new Uint8Array(40 * 20 * 4);
+  for (let i = 0; i < 40 * 20; i++) {
+    blueRgba[i * 4] = 2; blueRgba[i * 4 + 1] = 108; blueRgba[i * 4 + 2] = 223; blueRgba[i * 4 + 3] = 255;
+  }
+
+  // Case 1: Blue 4-letter captcha where official drops a letter ("LMR") under lengthMode="max".
+  const resBlue = await runtime.recognizeRgba({
+    rgba: blueRgba, width: 40, height: 20, expectedLength: 4, lengthMode: "max", charsetHint: "alphanumeric",
+  });
+  assert.equal(resBlue.answer, "TLMR");
+  assert.equal(resBlue.model, "official+fusion_v7");
+
+  // Case 2: Dark/blue digit captcha (even 3 digits / lower confidence) under alphanumeric hint -> must NOT be overridden with letters.
+  officialWord = "482";
+  fusionWord = "ABCD";
+  const resDigits = await runtime.recognizeRgba({
+    rgba: blueRgba, width: 40, height: 20, expectedLength: 4, lengthMode: "max", charsetHint: "alphanumeric",
+  });
+  assert.equal(resDigits.answer, "482");
+  assert.equal(resDigits.model, "official");
 });

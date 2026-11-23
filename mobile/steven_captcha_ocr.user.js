@@ -141,18 +141,27 @@
 
     const digitsAtom = String.raw`(?:\\d|\[[0-9-]+\]|[0-9])`;
     const lettersAtom = String.raw`(?:\[[A-Za-z-]+\]|[A-Za-z])`;
+    const alnumAtom = String.raw`(?:\\w|\[(?:0-9A-Za-z|A-Za-z0-9|a-zA-Z0-9|0-9a-zA-Z|A-Z0-9|0-9A-Z|a-z0-9|0-9a-z-)+\])`;
     const isPatternFor = (characterAtom) => new RegExp(
       String.raw`^\^?(?:\((?:\?:)?${characterAtom}\)|${characterAtom})(?:[+*?]|\{\d+(?:,\d*)?\})?\$?$`,
     ).test(regex);
     const text = [labelText, metadata, localContext].filter(Boolean).join(" ");
-    const mixedText = /英數|英数|字母與數字|字母和數字|字母与数字|alphanumeric/i.test(text)
-      || (/(?:[a-z]*letters?|alphabetic|字母|英文)/i.test(text) && /數字|数字|digits?|numeric/i.test(text));
+    const positiveLetterText = text.replace(
+      /(?:請勿|不要|不可|勿)\s*(?:輸入)?\s*英文|\b(?:no|not|without)\s+letters?\b/gi,
+      "",
+    );
+    const mixedText = isPatternFor(alnumAtom)
+      || /英數|英数|字母與數字|字母和數字|字母与数字|alphanumeric/i.test(text)
+      || (/(?:[a-z]*letters?|alphabetic|字母|英文)/i.test(positiveLetterText) && /數字|数字|digits?|numeric/i.test(text));
     const digitsText = /純[數数]字|[數数]字[驗验][證证][碼码]|\bdigits? only\b|\b\d+\s+digits?\b|\bnumeric\b/i.test(text);
     const explicitDigits = /^(?:number)$/i.test(type || "") || /^(?:numeric)$/i.test(inputMode || "");
     let charsetHint = "alphanumeric";
     if (explicitDigits || isPatternFor(digitsAtom) || (!mixedText && digitsText)) {
       charsetHint = "digits";
-    } else if (isPatternFor(lettersAtom) || (!mixedText && /純英文|英文字母|letters? only/i.test(text))) {
+    } else if (
+      isPatternFor(lettersAtom)
+      || (!mixedText && /純英文|英文字母|(?:請輸入|輸入|為)英文|英文\s*(?:驗證碼|验证码)|letters? only|\b(?:enter|input)\s+letters\b/i.test(positiveLetterText))
+    ) {
       charsetHint = "letters";
     }
     const caseSensitive = /(?:區分大小寫|区分大小写|\bcase[- ]sensitive\b)/i.test(
@@ -511,6 +520,55 @@
     return 255;
   }
 
+  function histogramMedian(hist, midpoint) {
+    let running = 0;
+    for (let v = 0; v < 256; v++) {
+      running += hist[v];
+      if (running >= midpoint) return v;
+    }
+    return 255;
+  }
+
+  function isBlueBackground(rgbBytes, width, height) {
+    checkPixels(rgbBytes, width, height, 3);
+    const n = width * height;
+    const histR = new Uint32Array(256);
+    const histG = new Uint32Array(256);
+    const histB = new Uint32Array(256);
+    for (let i = 0; i < n; i++) {
+      histR[rgbBytes[i * 3]] += 1;
+      histG[rgbBytes[i * 3 + 1]] += 1;
+      histB[rgbBytes[i * 3 + 2]] += 1;
+    }
+    const midpoint = Math.floor((n + 1) / 2);
+    const medR = histogramMedian(histR, midpoint);
+    const medG = histogramMedian(histG, midpoint);
+    const medB = histogramMedian(histB, midpoint);
+    return medB >= 140 && (medB - medR) >= 60 && (medB - medG) >= 30;
+  }
+
+  function alignedCharMatches(shortOrFour, four) {
+    const a = String(shortOrFour || "");
+    const b = String(four || "");
+    if (b.length !== 4) return 0;
+    if (a.length === 4) {
+      let matches = 0;
+      for (let i = 0; i < 4; i++) if (a[i] === b[i]) matches += 1;
+      return matches;
+    }
+    if (a.length === 3) {
+      let best = 0;
+      for (let skip = 0; skip < 4; skip++) {
+        const sub = b.slice(0, skip) + b.slice(skip + 1);
+        let matches = 0;
+        for (let i = 0; i < 3; i++) if (a[i] === sub[i]) matches += 1;
+        if (matches > best) best = matches;
+      }
+      return best;
+    }
+    return 0;
+  }
+
   function grayToRgbBytes(grayBytes) {
     const out = new Uint8Array(grayBytes.length * 3);
     for (let i = 0; i < grayBytes.length; i++) {
@@ -834,9 +892,172 @@
       };
     });
 
-    return {
+    const result = {
       answer,
       confidence: Number(rawConfidence.toFixed(4)),
+      char_confidences: charConfidences,
+      top_candidates: topCandidates,
+      candidates: topCandidates,
+    };
+    if (options.includeBeams) {
+      result.raw_beams = filtered.slice(0, 10);
+    }
+    return result;
+  }
+
+  function fuseOfficialAndFixed4(
+    officialBeams4,
+    directProbs,
+    cropProbs,
+    charset = DEFAULT_CHARSET,
+    options = {},
+  ) {
+    const charsetHint = options.charsetHint || "letters";
+    const wOfficial = Number(options.wOfficial ?? 1.0);
+    const wDirect = Number(options.wDirect ?? 1.0);
+    const wCrop = Number(options.wCrop ?? 1.0);
+    const floorLogProb = Number(options.floorLogProb ?? -12.0);
+    const cols = charset.length;
+    const positions = 4;
+    const eps = 1e-12;
+
+    const charToIndex = new Map();
+    for (let c = 0; c < cols; c++) {
+      if (isCharAllowed(charset[c], charsetHint)) {
+        charToIndex.set(charset[c], c);
+      }
+    }
+
+    // Collect top-6 beam candidates from direct * crop over allowed characters.
+    let dcBeams = [{ text: "", score: 0 }];
+    const posTopChars = [];
+    for (let pos = 0; pos < positions; pos++) {
+      const offset = pos * cols;
+      const ranked = [];
+      for (const [ch, c] of charToIndex.entries()) {
+        const dProb = Math.max(directProbs[offset + c] || 0, eps);
+        const cProb = Math.max(cropProbs[offset + c] || 0, eps);
+        ranked.push({
+          char: ch,
+          score: wDirect * Math.log(dProb) + wCrop * Math.log(cProb),
+        });
+      }
+      ranked.sort((a, b) => b.score - a.score);
+      const topChars = ranked.slice(0, 4);
+      posTopChars.push(topChars);
+      const next = [];
+      for (const beam of dcBeams) {
+        for (const item of topChars) {
+          next.push({ text: beam.text + item.char, score: beam.score + item.score });
+        }
+      }
+      next.sort((a, b) => b.score - a.score);
+      dcBeams = next.slice(0, 8);
+    }
+
+    const officialMap = new Map();
+    const pool = [];
+    const seen = new Set();
+    const validWord = (w) => typeof w === "string" && w.length === 4 && [...w].every((ch) => charToIndex.has(ch));
+
+    for (const item of officialBeams4 || []) {
+      const text = item?.text;
+      if (!validWord(text)) continue;
+      if (!officialMap.has(text)) officialMap.set(text, Number(item.logProb));
+      if (!seen.has(text) && pool.length < 8) {
+        seen.add(text);
+        pool.push(text);
+      }
+    }
+    for (const beam of dcBeams.slice(0, 6)) {
+      if (validWord(beam.text) && !seen.has(beam.text)) {
+        seen.add(beam.text);
+        pool.push(beam.text);
+      }
+    }
+    if (!pool.length) {
+      return {
+        answer: "",
+        confidence: 0,
+        char_confidences: [],
+        top_candidates: [],
+        candidates: [],
+      };
+    }
+
+    let minOfficialLog = Infinity;
+    for (const lp of officialMap.values()) {
+      if (lp < minOfficialLog) minOfficialLog = lp;
+    }
+    const effectiveFloor = Number.isFinite(minOfficialLog)
+      ? Math.min(floorLogProb, minOfficialLog - 1.0)
+      : floorLogProb;
+
+    const scored = pool.map((text) => {
+      const offLog = officialMap.has(text) ? officialMap.get(text) : effectiveFloor;
+      let dcLog = 0;
+      let rawDcLog = 0;
+      for (let pos = 0; pos < positions; pos++) {
+        const idx = charToIndex.get(text[pos]);
+        const dProb = Math.max(directProbs[pos * cols + idx] || 0, eps);
+        const cProb = Math.max(cropProbs[pos * cols + idx] || 0, eps);
+        const logD = Math.log(dProb);
+        const logC = Math.log(cProb);
+        rawDcLog += logD + logC;
+        dcLog += wDirect * logD + wCrop * logC;
+      }
+      return {
+        text,
+        score: wOfficial * offLog + dcLog,
+        cnnGeoMean: Math.exp(rawDcLog / (positions * 2)),
+      };
+    });
+    scored.sort((a, b) => b.score - a.score);
+
+    const maxScore = scored[0].score;
+    let sumExp = 0;
+    const weights = scored.map((item) => {
+      const w = Math.exp(Math.max(-40, item.score - maxScore));
+      sumExp += w;
+      return w;
+    });
+    const probs = weights.map((w) => w / (sumExp || 1));
+
+    const answer = scored[0].text;
+    const rawConf = scored.length === 1 ? Math.min(probs[0], scored[0].cnnGeoMean) : probs[0];
+    const confidence = Number(Math.min(0.999, Math.max(0.01, rawConf)).toFixed(4));
+    const topCandidates = scored.slice(0, 3).map((item, idx) => ({
+      answer: item.text,
+      confidence: Number(Math.min(0.999, Math.max(0.001, idx === 0 ? rawConf : probs[idx])).toFixed(4)),
+      solver_votes: 2,
+      total_votes: 2,
+    }));
+
+    const charConfidences = answer.split("").map((ch, pos) => {
+      let charProb = 0;
+      for (let i = 0; i < scored.length; i++) {
+        if (scored[i].text[pos] === ch) charProb += probs[i];
+      }
+      const alts = [];
+      for (let i = 1; i < Math.min(4, scored.length); i++) {
+        const altCh = scored[i].text[pos];
+        if (altCh !== ch && !alts.includes(altCh)) alts.push(altCh);
+      }
+      for (const item of posTopChars[pos] || []) {
+        if (item.char !== ch && !alts.includes(item.char)) alts.push(item.char);
+        if (alts.length >= 2) break;
+      }
+      return {
+        char: ch,
+        confidence: Number(Math.min(0.999, Math.max(0.05, charProb)).toFixed(4)),
+        alternatives: alts.slice(0, 2),
+      };
+    });
+
+    return {
+      answer,
+      confidence,
+      cnn_confidence: Number(scored[0].cnnGeoMean.toFixed(4)),
       char_confidences: charConfidences,
       top_candidates: topCandidates,
       candidates: topCandidates,
@@ -1086,7 +1307,7 @@
       };
     }
 
-    async function runOfficialOnRgb(rgbBytes, width, height, options) {
+    async function runOfficialTensor(rgbBytes, width, height) {
       const { charsetMeta, session } = state.official;
       const targetH = Number(charsetMeta.target_height || 64);
       const { tensor, width: resizedW, height: resizedH } = resizeGrayscaleUnit01(rgbBytes, width, height, targetH);
@@ -1095,16 +1316,27 @@
         [inputName]: new ort.Tensor("float32", tensor, [1, 1, resizedH, resizedW]),
       });
       const outTensor = outMap[session.outputNames[0]];
-      return ctcPrefixBeamAscii(outTensor.data, outTensor.dims, charsetMeta.ascii_entries || [], {
-        blankIndex: charsetMeta.blank_index ?? 0,
+      return { data: outTensor.data, dims: outTensor.dims, charsetMeta };
+    }
+
+    function decodeOfficialTensor(tensorOut, options) {
+      return ctcPrefixBeamAscii(tensorOut.data, tensorOut.dims, tensorOut.charsetMeta.ascii_entries || [], {
+        blankIndex: tensorOut.charsetMeta.blank_index ?? 0,
         charsetHint: options.charsetHint,
         caseSensitive: options.caseSensitive,
         expectedLength: options.expectedLength,
         lengthMode: options.lengthMode,
+        beamWidth: options.beamWidth,
+        includeBeams: options.includeBeams,
       });
     }
 
-    async function runFusionFixed4(rgbFull, width, height, options) {
+    async function runOfficialOnRgb(rgbBytes, width, height, options) {
+      const tensorOut = await runOfficialTensor(rgbBytes, width, height);
+      return decodeOfficialTensor(tensorOut, options);
+    }
+
+    async function runFusionFixed4Probs(rgbFull, width, height) {
       const { config, directSession, cropSession } = state.fusion;
       const [directH, directW] = config.direct_image_size || [96, 160];
       const [cropH, cropW] = config.crop_image_size || [96, 64];
@@ -1135,6 +1367,11 @@
       const charset = String(config.charset || DEFAULT_CHARSET);
       const directProbs = softmaxRows(directLogits, 4, charset.length);
       const cropProbs = softmaxRows(cropLogits, 4, charset.length);
+      return { directProbs, cropProbs, config, charset };
+    }
+
+    async function runFusionFixed4(rgbFull, width, height, options) {
+      const { directProbs, cropProbs, config, charset } = await runFusionFixed4Probs(rgbFull, width, height);
       return fuseFixed4Probabilities(
         directProbs,
         cropProbs,
@@ -1165,17 +1402,27 @@
       const grayFull = rgbToGrayscaleBytes(rgbFull, width, height);
       const medianLum = computeMedianLuminance(grayFull);
       const isDarkBg = medianLum < 170;
+      const isBlueBg = isDarkBg && isBlueBackground(rgbFull, width, height);
       const decodeOpts = { expectedLength, lengthMode, charsetHint, caseSensitive };
 
       // 1. Primary path: MIT-licensed general-purpose ddddocr official model (common_old.onnx)
       if (state.official) {
         let best;
+        let darkPrimaryTensor = null;
         if (isDarkBg) {
           const darkPrimaryRgb = enhanceDarkPrimaryRgb(grayFull, width, height);
-          best = await runOfficialOnRgb(darkPrimaryRgb, width, height, decodeOpts);
-          if (!best.answer || best.confidence < 0.85) {
+          darkPrimaryTensor = await runOfficialTensor(darkPrimaryRgb, width, height);
+          best = decodeOfficialTensor(darkPrimaryTensor, decodeOpts);
+          if (!best.answer || best.confidence < 0.85 || (expectedLength === 4 && (lengthMode === "exact" || isBlueBg) && best.answer.length !== 4)) {
             const rawRes = await runOfficialOnRgb(rgbFull, width, height, decodeOpts);
-            if (rawRes.answer && rawRes.confidence > (best.confidence || 0)) best = rawRes;
+            const rawFixesDroppedChar = expectedLength === 4
+              && (lengthMode === "exact" || isBlueBg)
+              && best.answer.length !== 4
+              && rawRes.answer.length === 4
+              && rawRes.confidence >= 0.35;
+            if (rawFixesDroppedChar || (rawRes.answer && rawRes.confidence > (best.confidence || 0))) {
+              best = rawRes;
+            }
           }
         } else {
           best = await runOfficialOnRgb(rgbFull, width, height, decodeOpts);
@@ -1186,21 +1433,44 @@
           }
         }
 
-        // Only consult fusion_v7 on dark-background 4-letter images when it agrees on >= 2 chars
-        // with official (prevents domain-specific CNN from overriding unrelated dark themes).
+        // Product-of-Experts joint fusion with fusion_v7 on dark/blue 4-letter CAPTCHAs.
+        // Protects digit-bearing answers when the input is not explicitly letter-only.
+        const officialHasDigits = /[0-9]/.test(best.answer || "");
+        const protectDigits = officialHasDigits && charsetHint !== "letters";
+        const lengthEligibleForFixed4 = expectedLength === 4
+          || (expectedLength === null && /^[A-Z]{3,4}$/.test(best.answer || ""));
         const eligibleDarkFusion = isDarkBg
           && Boolean(state.fusion)
           && !caseSensitive
           && charsetHint !== "digits"
-          && (expectedLength === 4 || (best.answer.length === 4 && /^[A-Z]{4}$/.test(best.answer)));
+          && !protectDigits
+          && lengthEligibleForFixed4;
         let modelUsed = "official";
-        if (eligibleDarkFusion && best.confidence < 0.92) {
-          const fused = await runFusionFixed4(rgbFull, width, height, decodeOpts);
-          const sharedPositions = best.answer.length === 4 && fused.answer.length === 4
-            ? [0, 1, 2, 3].filter((i) => best.answer[i] === fused.answer[i]).length
-            : 0;
-          if (fused.answer && fused.confidence >= 0.85 && (sharedPositions >= 2 || !best.answer)) {
-            best = fused;
+        if (eligibleDarkFusion && (isBlueBg || best.answer.length !== 4 || best.confidence < 0.92)) {
+          const official4 = darkPrimaryTensor
+            ? decodeOfficialTensor(darkPrimaryTensor, {
+              expectedLength: 4,
+              lengthMode: "exact",
+              charsetHint: "letters",
+              caseSensitive: false,
+              beamWidth: 32,
+              includeBeams: true,
+            }).raw_beams || []
+            : [];
+          const { directProbs, cropProbs, charset } = await runFusionFixed4Probs(rgbFull, width, height);
+          const joint = fuseOfficialAndFixed4(official4, directProbs, cropProbs, charset, {
+            charsetHint: "letters",
+          });
+          const matches = alignedCharMatches(best.answer, joint.answer);
+          const cnnConf = joint.cnn_confidence ?? 0;
+          const adoptJoint = Boolean(joint.answer) && (
+            (isBlueBg && ((matches >= 2 && cnnConf >= 0.15) || (matches >= 1 && cnnConf >= 0.30) || (!best.answer && cnnConf >= 0.30) || (charsetHint === "letters" && cnnConf >= 0.45) || cnnConf >= 0.60))
+            || (!best.answer && cnnConf >= 0.30)
+            || (best.answer.length === 3 && matches >= 2 && cnnConf >= 0.15 && joint.confidence >= 0.75)
+            || (matches >= 2 && cnnConf >= 0.25 && joint.confidence >= 0.82)
+          );
+          if (adoptJoint) {
+            best = joint;
             modelUsed = "official+fusion_v7";
           }
         }
@@ -1347,6 +1617,8 @@
     rgbaToRgb,
     rgbToGrayscaleBytes,
     computeMedianLuminance,
+    isBlueBackground,
+    alignedCharMatches,
     enhanceDarkPrimaryRgb,
     enhanceLightContrastRgb,
     resizeGrayscaleUnit01,
@@ -1355,6 +1627,7 @@
     softmaxRows,
     ctcPrefixBeamAscii,
     fuseFixed4Probabilities,
+    fuseOfficialAndFixed4,
     ctcGreedyDecode,
     createBrowserOcrRuntime,
   };
@@ -1755,11 +2028,22 @@
     const container = input.closest?.(
       "tr, td, .form-group, .field, .input-group, .form-row, .control-group, .form-item",
     );
-    if (container) return container.textContent || "";
-    const parent = input.parentElement;
-    if (!parent || ["FORM", "BODY", "HTML"].includes(parent.tagName)) return "";
-    const text = parent.textContent || "";
-    return text.length <= 300 ? text : "";
+    if (container) {
+      const ownText = (container.textContent || "").trim();
+      if (ownText) return ownText;
+      const outer = container.parentElement;
+      if (outer && !["FORM", "BODY", "HTML"].includes(outer.tagName)) {
+        const outerText = (outer.textContent || "").trim();
+        if (outerText.length <= 300) return outerText;
+      }
+    }
+    let parent = input.parentElement;
+    for (let depth = 0; depth < 2 && parent && !["FORM", "BODY", "HTML"].includes(parent.tagName); depth += 1) {
+      const text = (parent.textContent || "").trim();
+      if (text && text.length <= 300) return text;
+      parent = parent.parentElement;
+    }
+    return "";
   }
 
   function rectDistance(first, second) {

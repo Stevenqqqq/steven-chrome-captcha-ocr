@@ -298,13 +298,23 @@ def build_candidate_features(
         aggregate_score += weight
         variant_features.extend((1.0, 1.0 / (rank + 1), relative, float(rank == 0)))
 
+    if len(baseline_answer) == 3 and len(candidate) == 4:
+        position_matches = max(
+            sum(
+                left == right
+                for left, right in zip(candidate[:skip] + candidate[skip + 1:], baseline_answer)
+            )
+            for skip in range(4)
+        )
+    else:
+        position_matches = sum(left == right for left, right in zip(candidate, baseline_answer))
     basics = [
         aggregate_score,
         float(top1_votes),
         float(present_count),
         float(official_text_matches),
         float(candidate == baseline_answer),
-        float(sum(left == right for left, right in zip(candidate, baseline_answer))),
+        float(position_matches),
         float(_edit_distance(candidate, baseline_answer)),
         float(len(set(candidate))),
         float(sum(candidate[index] == candidate[index - 1] for index in range(1, len(candidate)))),
@@ -648,6 +658,23 @@ class Fixed4FusionOcr:
         pool = {item["answer"] for items in variant_candidates.values() for item in items}
         if len(baseline) == 4 and baseline.isalpha() and baseline.isupper():
             pool.add(baseline)
+        with Image.open(BytesIO(image_bytes)) as source:
+            image = source.convert("RGB")
+            direct_probability = self._direct_probabilities(image)
+            crop_probability = self._crop_probabilities(image)
+        alpha_indices = [self.charset.index(ch) for ch in ALPHABET]
+        dc_top1_chars = []
+        dc_log_sum = 0.0
+        for pos in range(4):
+            d_pos = np.maximum(direct_probability[pos, alpha_indices], 1e-12)
+            c_pos = np.maximum(crop_probability[pos, alpha_indices], 1e-12)
+            best_idx = int(np.argmax(np.log(d_pos) + np.log(c_pos)))
+            dc_top1_chars.append(ALPHABET[best_idx])
+            dc_log_sum += math.log(float(d_pos[best_idx])) + math.log(float(c_pos[best_idx]))
+        dc_top1 = "".join(dc_top1_chars)
+        dc_geo_mean = math.exp(dc_log_sum / 8.0)
+        if dc_geo_mean >= 0.35 and len(dc_top1) == 4 and dc_top1.isalpha() and dc_top1.isupper():
+            pool.add(dc_top1)
         candidates = sorted(
             candidate for candidate in pool
             if len(candidate) == 4 and candidate.isalpha() and candidate.isupper()
@@ -659,10 +686,6 @@ class Fixed4FusionOcr:
             for candidate in candidates
         ], dtype=np.float32)
         v4_probability = _softmax(self._reranker(features))
-        with Image.open(BytesIO(image_bytes)) as source:
-            image = source.convert("RGB")
-            direct_probability = self._direct_probabilities(image)
-            crop_probability = self._crop_probabilities(image)
         direct_scores = []
         crop_scores = []
         for candidate in candidates:
@@ -681,10 +704,17 @@ class Fixed4FusionOcr:
         )
         fused = _softmax(logits)
         top_index = int(np.argmax(fused))
-        answer = candidates[top_index] if float(fused[top_index]) >= self.threshold else baseline
+        top_cnn_geo_mean = math.exp((direct_scores[top_index] + crop_scores[top_index]) / 2.0)
+        top_probability = (
+            min(float(fused[top_index]), top_cnn_geo_mean)
+            if len(candidates) == 1
+            else float(fused[top_index])
+        )
+        effective_threshold = self.threshold if len(baseline) == 4 else min(self.threshold, 0.35)
+        answer = candidates[top_index] if top_probability >= effective_threshold else baseline
         return {
             "answer": answer,
-            "fused_top_probability": float(fused[top_index]),
+            "fused_top_probability": top_probability,
             "fusion_candidate_count": len(candidates),
             "fusion_model": "v4+v6+v7",
         }

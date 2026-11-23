@@ -232,6 +232,9 @@ test("distinguishes max length, numeric fields, letters, mixed hints and case", 
     assert.equal(inferInputHints(hints).charsetHint, "digits");
   }
   assert.equal(inferInputHints({ pattern: "[A-Za-z]" }).charsetHint, "letters");
+  assert.equal(inferInputHints({ localContext: "※驗證碼請輸入英文 ※輸入完畢請按Enter下一題" }).charsetHint, "letters");
+  assert.equal(inferInputHints({ localContext: "請勿輸入英文" }).charsetHint, "alphanumeric");
+  assert.equal(inferInputHints({ pattern: "[A-Za-z0-9]{4}", labelText: "Enter letters as shown" }).charsetHint, "alphanumeric");
   assert.equal(inferInputHints({ localContext: "數字驗證碼 or letters" }).charsetHint, "alphanumeric");
   assert.equal(inferInputHints({ labelText: "not case sensitive" }).caseSensitive, false);
   assert.deepEqual(inferInputHints({ pattern: "[A-Za-z0-9]{3,6}", maxLength: 99 }), {

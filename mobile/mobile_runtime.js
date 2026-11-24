@@ -379,6 +379,7 @@
       element.getAttribute?.("title") || "",
       element.getAttribute?.("placeholder") || "",
       element.getAttribute?.("aria-label") || "",
+      element.getAttribute?.("autocomplete") || "",
       element.getAttribute?.("src") || "",
     ].join(" ").toLowerCase();
   }

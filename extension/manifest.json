@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Steven 驗證碼 OCR 助手",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "支援純瀏覽器離線 ONNX 與本機服務，按一下即可辨識圖片文字並填入鄰近欄位（不自動送出）。",
   "minimum_chrome_version": "127",
   "permissions": [

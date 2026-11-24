@@ -7,7 +7,7 @@
   const MAX_DATA_URL_LENGTH = 7_000_000;
   const SAFE_DATA_IMAGE_PATTERN = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]*={0,2}$/i;
   const CAPTCHA_HINT_PATTERN = /captcha|verify|verification|vcode|auth.?code|check.?code|security.?code|驗證碼|验证码|圖形碼|校驗碼/i;
-  const NON_CAPTCHA_INPUT_PATTERN = /user|username|account|login|employee|student|email|phone|mobile|password|帳號|帐号|學號|学号|工號|工号|密碼|密码|電子郵件|手機/i;
+  const NON_CAPTCHA_INPUT_PATTERN = /user|username|account|login|employee|student|email|phone|mobile|password|帳號|帐号|用戶|用户|使用者|學號|学号|工號|工号|密碼|密码|電子郵件|信箱|手機|電話/i;
 
   function safeDataImage(dataUrl) {
     return typeof dataUrl === "string"

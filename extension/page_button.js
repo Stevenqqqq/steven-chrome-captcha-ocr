@@ -22,6 +22,8 @@
   const VIEWPORT_MARGIN = 12;
   const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
   const HINT_PATTERN = /captcha|verify|verification|vcode|auth.?code|check.?code|security.?code|驗證碼|验证码|圖形碼|校驗碼/i;
+  const NON_CAPTCHA_INPUT_PATTERN = /user|username|account|login|employee|student|email|phone|mobile|password|帳號|帐号|用戶|用户|使用者|學號|学号|工號|工号|密碼|密码|電子郵件|信箱|手機|電話/i;
+  const NON_CAPTCHA_AUTOCOMPLETE_PATTERN = /^(?:username|email|current-password|new-password|tel|name|given-name|family-name|organization|street-address)$/i;
   const INPUT_SELECTOR = "input:not([type]), input[type='text'], input[type='tel'], input[type='search'], input[type='number']";
 
   const PILL_CSS = `
@@ -229,6 +231,7 @@
       el.getAttribute?.("title") || "",
       el.getAttribute?.("placeholder") || "",
       el.getAttribute?.("aria-label") || "",
+      el.getAttribute?.("autocomplete") || "",
       el.getAttribute?.("src") || "",
     ].join(" ").toLowerCase();
   }
@@ -286,7 +289,7 @@
     return { expectedLength, lengthMode, charsetHint, caseSensitive };
   }
 
-  function scorePair(image, input, win) {
+  function scorePair(image, input) {
     const imgRect = image.getBoundingClientRect();
     const inpRect = input.getBoundingClientRect();
     const imgMeta = textOf(image);
@@ -303,30 +306,50 @@
     const ratio = imgRect.width / Math.max(imgRect.height, 1);
     if (ratio >= 1.2 && ratio <= 7) imgScore += 8;
 
+    const semanticText = `${inpMeta} ${inpLabel}`;
+    const autocomplete = String(input.getAttribute?.("autocomplete") || "").trim();
     let inpScore = 0;
-    if (HINT_PATTERN.test(inpMeta)) inpScore += 42;
-    if (HINT_PATTERN.test(inpLabel)) inpScore += 36;
-    if (HINT_PATTERN.test(inpContext)) inpScore += 22;
-    if (input.maxLength >= 3 && input.maxLength <= 8) inpScore += 12;
+    if (HINT_PATTERN.test(inpMeta)) inpScore += 55;
+    if (HINT_PATTERN.test(inpLabel)) inpScore += 70;
+    if (HINT_PATTERN.test(inpContext)) inpScore += 30;
+    if (NON_CAPTCHA_INPUT_PATTERN.test(semanticText) || NON_CAPTCHA_AUTOCOMPLETE_PATTERN.test(autocomplete)) {
+      inpScore -= 90;
+    }
+    if (input.value) inpScore -= 35;
+    if (input.maxLength >= 3 && input.maxLength <= 8) inpScore += 20;
 
-    const dx = (imgRect.left + imgRect.width / 2) - (inpRect.left + inpRect.width / 2);
-    const dy = (imgRect.top + imgRect.height / 2) - (inpRect.top + inpRect.height / 2);
-    const dist = Math.hypot(dx, dy);
-    if (dist <= 260) inpScore += 16;
-    else if (dist <= 480) inpScore += 8;
+    const imgCx = Number(imgRect.left || 0) + Number(imgRect.width || 0) / 2;
+    const imgCy = Number(imgRect.top || 0) + Number(imgRect.height || 0) / 2;
+    const inpCx = Number(inpRect.left || 0) + Number(inpRect.width || 0) / 2;
+    const inpCy = Number(inpRect.top || 0) + Number(inpRect.height || 0) / 2;
+    const horizontal = imgCx - inpCx;
+    const vertical = Math.abs(imgCy - inpCy);
+    const dist = Math.hypot(horizontal, vertical);
+    inpScore += Math.max(0, 30 - dist / 12);
+
+    const rowTolerance = Math.max(24, Math.min(Number(imgRect.height || 0), Number(inpRect.height || 0)) * 1.25);
+    const sameRow = vertical <= rowTolerance;
+    if (sameRow) {
+      inpScore += 60;
+      const gap = Number(imgRect.left || 0) - (Number(inpRect.left || 0) + Number(inpRect.width || 0));
+      if (gap >= -24 && gap <= 180) inpScore += 35;
+      if (horizontal >= -20) inpScore += 10;
+    } else {
+      inpScore -= Math.min(45, vertical / 5);
+    }
 
     if (image.tagName?.toLowerCase() === "svg") {
       if (imgRect.width < 36 || imgRect.width > 420 || imgRect.height < 16 || imgRect.height > 180) return null;
-      if (!HINT_PATTERN.test(imgMeta) && !HINT_PATTERN.test(`${inpMeta} ${inpLabel}`)) return null;
+      if (!HINT_PATTERN.test(imgMeta) && !HINT_PATTERN.test(semanticText)) return null;
     }
 
     const total = imgScore + Math.min(35, inpScore / 2);
     const hasHint = HINT_PATTERN.test(imgMeta) || HINT_PATTERN.test(inpMeta) || HINT_PATTERN.test(inpLabel) || HINT_PATTERN.test(inpContext);
-    if (!hasHint || total < 34 || inpScore < 16 || dist > 620) return null;
-    return { image, input, score: total, distance: dist };
+    if (!hasHint || total < 22 || inpScore < 8 || dist > 620) return null;
+    return { image, input, score: total, inputScore: inpScore, distance: dist };
   }
 
-  function detectQuickTarget(doc, { preferredInput = null, profile = null } = {}) {
+  function detectQuickTarget(doc, { profile = null } = {}) {
     const win = doc?.defaultView || root;
     if (!doc) return { ok: false };
 
@@ -353,23 +376,34 @@
       }
     }
 
-    let inputs;
-    if (preferredInput && editableInput(preferredInput) && isVisible(preferredInput, win)) {
-      inputs = [preferredInput];
-    } else {
-      inputs = Array.from(doc.querySelectorAll(INPUT_SELECTOR)).filter((el) => editableInput(el) && isVisible(el, win)).slice(0, 24);
-    }
+    const inputs = Array.from(doc.querySelectorAll(INPUT_SELECTOR))
+      .filter((el) => editableInput(el) && isVisible(el, win))
+      .slice(0, 24);
     if (!inputs.length) return { ok: false };
 
     const images = Array.from(doc.querySelectorAll("img, canvas, svg")).filter((el) => isVisible(el, win)).slice(0, 48);
     let best = null;
-    for (const input of inputs) {
-      for (const image of images) {
-        const pair = scorePair(image, input, win);
+    for (const image of images) {
+      let bestForImage = null;
+      for (const input of inputs) {
+        const pair = scorePair(image, input);
         if (!pair) continue;
-        if (!best || pair.score > best.score || (pair.score === best.score && pair.distance < best.distance)) {
-          best = pair;
+        if (
+          !bestForImage
+          || pair.inputScore > bestForImage.inputScore
+          || (pair.inputScore === bestForImage.inputScore && pair.distance < bestForImage.distance)
+        ) {
+          bestForImage = pair;
         }
+      }
+      if (!bestForImage) continue;
+      if (
+        !best
+        || bestForImage.score > best.score
+        || (bestForImage.score === best.score && bestForImage.inputScore > best.inputScore)
+        || (bestForImage.score === best.score && bestForImage.inputScore === best.inputScore && bestForImage.distance < best.distance)
+      ) {
+        best = bestForImage;
       }
     }
     if (!best) return { ok: false };
@@ -753,18 +787,18 @@
       return cachedProfile;
     }
 
-    async function scan({ preferredInput = null, force = false } = {}) {
+    async function scan({ force = false } = {}) {
       if (closed || mode === "busy" || doc.visibilityState === "hidden") return false;
-      if (!preferredInput && typeof doc.querySelector === "function" && !doc.querySelector("input")) {
+      if (typeof doc.querySelector === "function" && !doc.querySelector("input")) {
         if (host.parent || host.isConnected) detachHost();
         return false;
       }
       const profile = await ensureProfile();
       if (closed) return false;
-      const found = detectQuickTarget(doc, { preferredInput, profile });
+      const found = detectQuickTarget(doc, { profile });
       if (!found.ok) {
-        if (!preferredInput && !currentTarget) return false;
-        if (!preferredInput && currentTarget && (currentTarget.input.isConnected === false || currentTarget.image.isConnected === false)) {
+        if (!currentTarget) return false;
+        if (currentTarget.input.isConnected === false || currentTarget.image.isConnected === false) {
           currentTarget = null;
           currentIdentity = "";
           detachHost();
@@ -793,7 +827,7 @@
     async function recognizeCurrent() {
       if (closed || mode === "busy") return;
       const profile = await ensureProfile();
-      const fresh = detectQuickTarget(doc, { preferredInput: currentTarget?.input || null, profile });
+      const fresh = detectQuickTarget(doc, { profile });
       if (fresh.ok) currentTarget = fresh;
       if (!currentTarget?.image || !currentTarget?.input) return;
 
@@ -833,7 +867,17 @@
     function onFocusIn(event) {
       const target = event?.target;
       if (!editableInput(target)) return;
-      scan({ preferredInput: target }).catch(() => {});
+      // If the pill is already mounted on a live target, focusing another input must not hijack or churn it.
+      if (
+        (host.isConnected || host.parent)
+        && currentTarget?.input?.isConnected !== false
+        && currentTarget?.image?.isConnected !== false
+        && target !== currentTarget.input
+        && elementIdentity(currentTarget.image, win) === currentIdentity
+      ) {
+        return;
+      }
+      scan().catch(() => {});
     }
 
     function invalidateProfileCache() {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steven 驗證碼 OCR 助手（iPhone Safari 離線版）
 // @namespace    https://github.com/Stevenqqqq/steven-chrome-captcha-ocr
-// @version      2.0.1
+// @version      2.0.2
 // @description  在手機 Safari 本地以 ONNX WASM 離線辨識驗證碼並一鍵填入（不自動送出）
 // @author       Stevenqqqq
 // @match        http://*/*
@@ -35,7 +35,7 @@
   const MAX_DATA_URL_LENGTH = 7_000_000;
   const SAFE_DATA_IMAGE_PATTERN = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]*={0,2}$/i;
   const CAPTCHA_HINT_PATTERN = /captcha|verify|verification|vcode|auth.?code|check.?code|security.?code|驗證碼|验证码|圖形碼|校驗碼/i;
-  const NON_CAPTCHA_INPUT_PATTERN = /user|username|account|login|employee|student|email|phone|mobile|password|帳號|帐号|學號|学号|工號|工号|密碼|密码|電子郵件|手機/i;
+  const NON_CAPTCHA_INPUT_PATTERN = /user|username|account|login|employee|student|email|phone|mobile|password|帳號|帐号|用戶|用户|使用者|學號|学号|工號|工号|密碼|密码|電子郵件|信箱|手機|電話/i;
 
   function safeDataImage(dataUrl) {
     return typeof dataUrl === "string"
@@ -2054,6 +2054,7 @@
       element.getAttribute?.("title") || "",
       element.getAttribute?.("placeholder") || "",
       element.getAttribute?.("aria-label") || "",
+      element.getAttribute?.("autocomplete") || "",
       element.getAttribute?.("src") || "",
     ].join(" ").toLowerCase();
   }

@@ -260,3 +260,52 @@ test("startDesktopPageButton honors pageButtonEnabled storage toggle live", asyn
   assert.equal(handle.getController(), null);
   assert.equal(doc.getElementById(pageButton.HOST_ID), null);
 });
+
+test("focusing the account input on a login form never hijacks the target or fills the account field", async () => {
+  const { doc, input: captchaInput, img } = createDesktopFixture({ withCaptcha: true });
+  // Reproduce compact login card: account input at top, captcha input + image on bottom row.
+  captchaInput.rect = { left: 40, top: 215, right: 215, bottom: 257, width: 175, height: 42 };
+  img.rect = { left: 230, top: 215, right: 360, bottom: 257, width: 130, height: 42 };
+
+  const InputCtor = doc.defaultView.HTMLInputElement;
+  const accountInput = new InputCtor();
+  accountInput.id = "account";
+  accountInput.maxLength = 32;
+  accountInput.minLength = 0;
+  accountInput.setAttribute("autocomplete", "username");
+  accountInput.rect = { left: 40, top: 80, right: 360, bottom: 122, width: 320, height: 42 };
+  // Place accountInput before captchaInput in DOM order (typical login form).
+  doc.body.replaceChildren(accountInput, captchaInput, img);
+
+  const ctrl = pageButton.mountDesktopPageButton({
+    doc,
+    sendMessage: async () => ({
+      ok: true,
+      answer: "F4B6",
+      confidence: 0.96,
+      length_match: true,
+      candidates: [{ answer: "F4B6" }],
+    }),
+  });
+  await new Promise((r) => setImmediate(r));
+
+  // Focus the account input (this previously hijacked preferredInput to accountInput).
+  const focusEvt = new Event("focusin", { bubbles: true });
+  Object.defineProperty(focusEvt, "target", { value: accountInput });
+  doc.dispatchEvent(focusEvt);
+  await new Promise((r) => setImmediate(r));
+
+  const host = doc.getElementById(pageButton.HOST_ID);
+  const [, pill] = host.shadowRoot.children;
+  const [, mainRow] = pill.children;
+  mainRow.children[0].dispatchEvent(new Event("click", { cancelable: true }));
+  await new Promise((r) => setTimeout(r, 10));
+
+  assert.equal(accountInput.value, "", "Account input must never be filled with the CAPTCHA answer");
+  assert.equal(captchaInput.value, "F4B6", "Same-row CAPTCHA input must receive the answer");
+  ctrl.close();
+
+  // Even if the captcha input is absent, an account input above the image must not match.
+  doc.body.replaceChildren(accountInput, img);
+  assert.equal(pageButton.detectQuickTarget(doc).ok, false);
+});

@@ -259,7 +259,7 @@ test("manifest grants storage and offscreen with wasm-unsafe-eval CSP", () => {
   assert.ok(manifest.permissions.includes("storage"));
   assert.ok(manifest.permissions.includes("offscreen"));
   assert.match(manifest.content_security_policy?.extension_pages || "", /wasm-unsafe-eval/);
-  assert.equal(manifest.version, "2.0.1");
+  assert.equal(manifest.version, "2.0.2");
 });
 
 

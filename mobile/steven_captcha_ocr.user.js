@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steven 驗證碼 OCR 助手（iPhone Safari 離線版）
 // @namespace    https://github.com/Stevenqqqq/steven-chrome-captcha-ocr
-// @version      2.0.2
+// @version      2.0.3
 // @description  在手機 Safari 本地以 ONNX WASM 離線辨識驗證碼並一鍵填入（不自動送出）
 // @author       Stevenqqqq
 // @match        http://*/*
@@ -2809,6 +2809,8 @@
     let drag = null;
     let viewportListening = false;
     let positionRaf = null;
+    let watchedTarget = null;
+    let refreshTimers = [];
 
     // Choose one event family so a touch never starts two gestures.
     const usePointer = typeof win.PointerEvent === "function";
@@ -3008,6 +3010,7 @@
         mainRow.replaceChildren(triggerBtn, closeBtn);
       }
 
+      syncResultWatchers();
       positionPill();
     }
 
@@ -3015,10 +3018,11 @@
       if (closed || mode === "busy") return;
       const freshTarget = detectCaptchaTarget(doc, detect);
       if (freshTarget.ok) {
-        if (targetChanged(freshTarget)) resetDrag();
+        if (freshTarget.input !== currentTarget?.input) resetDrag();
         currentTarget = freshTarget;
       }
       if (!currentTarget?.image || !currentTarget?.input) return;
+      currentIdentity = imageIdentity(currentTarget.image);
 
       mode = "busy";
       busyText = "⏳ 讀取圖片...";
@@ -3058,12 +3062,105 @@
       }
     }
 
+    function clearRefreshTimers() {
+      for (const id of refreshTimers) win.clearTimeout?.(id);
+      refreshTimers = [];
+    }
+
+    function resetToIdle(nextIdentity = currentIdentity) {
+      clearRefreshTimers();
+      mode = "idle";
+      lastResult = null;
+      currentAnswer = "";
+      errorText = "";
+      currentIdentity = nextIdentity;
+      render();
+    }
+
+    function checkTargetRefresh() {
+      if (closed || (mode !== "result" && mode !== "error") || !currentTarget) return;
+      if (currentTarget.input.isConnected === false || currentTarget.image.isConnected === false) {
+        clearRefreshTimers();
+        scan({ force: true });
+        return;
+      }
+      const nextIdentity = imageIdentity(currentTarget.image);
+      const inputCleared = mode === "result" && Boolean(currentAnswer) && !currentTarget.input.value;
+      if (nextIdentity !== currentIdentity || inputCleared) {
+        resetToIdle(nextIdentity);
+      }
+    }
+
+    function scheduleTargetRefresh() {
+      clearRefreshTimers();
+      if (closed || (mode !== "result" && mode !== "error")) return;
+      for (const delay of [80, 350]) {
+        let id = null;
+        id = win.setTimeout(() => {
+          if (id !== null) refreshTimers = refreshTimers.filter((item) => item !== id);
+          checkTargetRefresh();
+        }, delay);
+        if (id !== null && id !== undefined) refreshTimers.push(id);
+      }
+    }
+
+    function onResultKeyDown(event) {
+      if (event?.key === "Enter") scheduleTargetRefresh();
+    }
+
+    function onTargetInputChange() {
+      if (mode === "result" && currentAnswer && !currentTarget?.input?.value) {
+        resetToIdle(imageIdentity(currentTarget.image));
+      }
+    }
+
+    function onTargetImageLoad() {
+      if (closed || (mode !== "result" && mode !== "error") || !currentTarget?.image) return;
+      resetToIdle(imageIdentity(currentTarget.image));
+    }
+
+    function detachResultWatchers() {
+      clearRefreshTimers();
+      if (!watchedTarget) return;
+      doc.removeEventListener?.("keydown", onResultKeyDown, true);
+      watchedTarget.image?.removeEventListener?.("load", onTargetImageLoad);
+      watchedTarget.image?.removeEventListener?.("click", scheduleTargetRefresh);
+      watchedTarget.input?.removeEventListener?.("input", onTargetInputChange);
+      watchedTarget.form?.removeEventListener?.("submit", scheduleTargetRefresh);
+      watchedTarget = null;
+    }
+
+    function syncResultWatchers() {
+      const shouldWatch = !closed && (mode === "result" || mode === "error") && Boolean(currentTarget);
+      if (!shouldWatch) {
+        detachResultWatchers();
+        return;
+      }
+      const form = currentTarget.input?.form || currentTarget.input?.closest?.("form") || null;
+      if (
+        watchedTarget
+        && watchedTarget.image === currentTarget.image
+        && watchedTarget.input === currentTarget.input
+        && watchedTarget.form === form
+      ) {
+        return;
+      }
+      detachResultWatchers();
+      watchedTarget = { image: currentTarget.image, input: currentTarget.input, form };
+      doc.addEventListener?.("keydown", onResultKeyDown, true);
+      watchedTarget.image?.addEventListener?.("load", onTargetImageLoad);
+      watchedTarget.image?.addEventListener?.("click", scheduleTargetRefresh);
+      watchedTarget.input?.addEventListener?.("input", onTargetInputChange);
+      watchedTarget.form?.addEventListener?.("submit", scheduleTargetRefresh);
+    }
+
     function resetDrag() {
       stopDrag();
       userDragPos = null;
     }
 
     function detachHost() {
+      detachResultWatchers();
       resetDrag();
       detachViewportListeners();
       host.remove();
@@ -3089,6 +3186,14 @@
     }
 
     function imageIdentity(image) {
+      if (image?.tagName?.toUpperCase() === "CANVAS" && typeof image.toDataURL === "function") {
+        try {
+          const data = image.toDataURL("image/png");
+          if (data) return detect.imageIdentity(image, data, "");
+        } catch {
+          // Ignore tainted canvas.
+        }
+      }
       return detect.imageIdentity(image, "", win.getComputedStyle(image).backgroundImage);
     }
 

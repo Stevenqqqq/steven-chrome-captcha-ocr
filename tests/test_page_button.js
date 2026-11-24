@@ -309,3 +309,56 @@ test("focusing the account input on a login form never hijacks the target or fil
   doc.body.replaceChildren(accountInput, img);
   assert.equal(pageButton.detectQuickTarget(doc).ok, false);
 });
+
+test("desktop page button resets back to 辨識 after Enter advances to the next image or clears the input", async () => {
+  const { doc, img, input } = createDesktopFixture({ withCaptcha: true });
+  let focused = 0;
+  input.focus = () => { focused += 1; };
+
+  let round = 0;
+  const ctrl = pageButton.mountDesktopPageButton({
+    doc,
+    sendMessage: async () => {
+      round += 1;
+      return {
+        ok: true,
+        answer: round === 1 ? "HKEF" : "JSWH",
+        confidence: 0.95,
+        length_match: true,
+        candidates: [{ answer: round === 1 ? "HKEF" : "JSWH" }],
+      };
+    },
+  });
+  await new Promise((r) => setImmediate(r));
+
+  const host = doc.getElementById(pageButton.HOST_ID);
+  const [, pill] = host.shadowRoot.children;
+  const [, mainRow] = pill.children;
+  assert.equal(mainRow.children[0].textContent, "🔍 辨識");
+
+  // Round 1: click recognize -> fills HKEF and focuses input so Enter works directly.
+  mainRow.children[0].dispatchEvent(new Event("click", { cancelable: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctrl.getState().mode, "result");
+  assert.equal(input.value, "HKEF");
+  assert.equal(focused, 1);
+
+  // Site clears input and advances on Enter (simulating webbboxx.com).
+  input.value = "";
+  const enterEvt = Object.assign(new Event("keydown", { bubbles: true }), { key: "Enter" });
+  doc.dispatchEvent(enterEvt);
+  assert.equal(ctrl.getState().mode, "idle");
+  assert.equal(mainRow.children[0].textContent, "🔍 辨識");
+
+  // Round 2: click recognize again -> fills JSWH; then image load event resets button back to 辨識.
+  mainRow.children[0].dispatchEvent(new Event("click", { cancelable: true }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctrl.getState().mode, "result");
+  assert.equal(input.value, "JSWH");
+
+  img.setAttribute("src", "data:image/png;base64,BBBB");
+  img.dispatchEvent(new Event("load"));
+  assert.equal(ctrl.getState().mode, "idle");
+  assert.equal(mainRow.children[0].textContent, "🔍 辨識");
+  ctrl.close();
+});

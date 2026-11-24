@@ -657,3 +657,28 @@ test("mobile MutationObserver ignores style/class attribute churn and detaches v
   assert.ok(removed.includes("resize"));
   ui.close();
 });
+
+test("mobile pill resets back to idle after image load or Enter clears the input", async () => {
+  const { doc, img, input } = createMobileDomFixture();
+  const ui = mobile.mountMobileCaptchaUi({
+    doc,
+    engine: {
+      async recognizeRgba() {
+        return { ok: true, answer: "HKEF", confidence: 0.95, length_match: true, candidates: [{ answer: "HKEF" }] };
+      },
+    },
+    detect,
+    captchaImage,
+    decodeBlob: async () => ({ rgba: new Uint8Array(120 * 40 * 4).fill(240), width: 120, height: 40 }),
+    observeMutations: false,
+  });
+
+  await ui.recognizeCurrent();
+  assert.equal(ui.getUiState().mode, "result");
+  assert.equal(input.value, "HKEF");
+
+  img.setAttribute("src", "data:image/png;base64,NEXT");
+  img.dispatchEvent(new Event("load"));
+  assert.equal(ui.getUiState().mode, "idle");
+  ui.close();
+});

@@ -522,6 +522,16 @@
     if (!image) return "";
     const tag = image.tagName?.toUpperCase() || "";
     if (tag === "IMG") return image.currentSrc || image.getAttribute?.("src") || image.id || "img";
+    if (tag === "CANVAS") {
+      try {
+        if (typeof image.toDataURL === "function") {
+          const data = image.toDataURL("image/png");
+          if (data) return `CANVAS:${data.length}:${data.slice(-32)}`;
+        }
+      } catch {
+        // Ignore tainted canvas.
+      }
+    }
     return image.id || extractCssBackgroundUrl(win.getComputedStyle?.(image)?.backgroundImage) || tag;
   }
 
@@ -589,6 +599,8 @@
     let cachedProfile = undefined;
     let idleHandle = null;
     let idleUsesRic = false;
+    let watchedTarget = null;
+    let refreshTimers = [];
 
     function startDrag(event) {
       if (drag || event.button !== 0 || event.isPrimary === false) return;
@@ -682,6 +694,7 @@
       if (input.value !== value) return false;
       input.dispatchEvent(new win.Event("input", { bubbles: true, composed: true }));
       input.dispatchEvent(new win.Event("change", { bubbles: true }));
+      input.focus?.();
       return input.value === value;
     }
 
@@ -690,7 +703,100 @@
       return `${elementIdentity(target.image, win)}|${target.input.id || target.input.name || "input"}`;
     }
 
+    function clearRefreshTimers() {
+      for (const id of refreshTimers) win.clearTimeout?.(id);
+      refreshTimers = [];
+    }
+
+    function resetToIdle(nextIdentity = currentIdentity) {
+      clearRefreshTimers();
+      mode = "idle";
+      lastResult = null;
+      currentAnswer = "";
+      errorText = "";
+      currentIdentity = nextIdentity;
+      render();
+    }
+
+    function checkTargetRefresh() {
+      if (closed || (mode !== "result" && mode !== "error") || !currentTarget) return;
+      if (currentTarget.input.isConnected === false || currentTarget.image.isConnected === false) {
+        clearRefreshTimers();
+        scan({ force: true }).catch(() => {});
+        return;
+      }
+      const nextIdentity = elementIdentity(currentTarget.image, win);
+      const inputCleared = mode === "result" && Boolean(currentAnswer) && !currentTarget.input.value;
+      if (nextIdentity !== currentIdentity || inputCleared) {
+        resetToIdle(nextIdentity);
+      }
+    }
+
+    function scheduleTargetRefresh() {
+      clearRefreshTimers();
+      if (closed || (mode !== "result" && mode !== "error")) return;
+      for (const delay of [80, 350]) {
+        let id = null;
+        id = win.setTimeout(() => {
+          if (id !== null) refreshTimers = refreshTimers.filter((item) => item !== id);
+          checkTargetRefresh();
+        }, delay);
+        if (id !== null && id !== undefined) refreshTimers.push(id);
+      }
+    }
+
+    function onResultKeyDown(event) {
+      if (event?.key === "Enter") scheduleTargetRefresh();
+    }
+
+    function onTargetInputChange() {
+      if (mode === "result" && currentAnswer && !currentTarget?.input?.value) {
+        resetToIdle(elementIdentity(currentTarget.image, win));
+      }
+    }
+
+    function onTargetImageLoad() {
+      if (closed || (mode !== "result" && mode !== "error") || !currentTarget?.image) return;
+      resetToIdle(elementIdentity(currentTarget.image, win));
+    }
+
+    function detachResultWatchers() {
+      clearRefreshTimers();
+      if (!watchedTarget) return;
+      doc.removeEventListener?.("keydown", onResultKeyDown, true);
+      watchedTarget.image?.removeEventListener?.("load", onTargetImageLoad);
+      watchedTarget.image?.removeEventListener?.("click", scheduleTargetRefresh);
+      watchedTarget.input?.removeEventListener?.("input", onTargetInputChange);
+      watchedTarget.form?.removeEventListener?.("submit", scheduleTargetRefresh);
+      watchedTarget = null;
+    }
+
+    function syncResultWatchers() {
+      const shouldWatch = !closed && (mode === "result" || mode === "error") && Boolean(currentTarget);
+      if (!shouldWatch) {
+        detachResultWatchers();
+        return;
+      }
+      const form = currentTarget.input?.form || currentTarget.input?.closest?.("form") || null;
+      if (
+        watchedTarget
+        && watchedTarget.image === currentTarget.image
+        && watchedTarget.input === currentTarget.input
+        && watchedTarget.form === form
+      ) {
+        return;
+      }
+      detachResultWatchers();
+      watchedTarget = { image: currentTarget.image, input: currentTarget.input, form };
+      doc.addEventListener?.("keydown", onResultKeyDown, true);
+      watchedTarget.image?.addEventListener?.("load", onTargetImageLoad);
+      watchedTarget.image?.addEventListener?.("click", scheduleTargetRefresh);
+      watchedTarget.input?.addEventListener?.("input", onTargetInputChange);
+      watchedTarget.form?.addEventListener?.("submit", scheduleTargetRefresh);
+    }
+
     function detachHost() {
+      detachResultWatchers();
       stopDrag();
       userDragPos = null;
       detachViewportListeners();
@@ -774,6 +880,7 @@
         mainRow.replaceChildren(triggerBtn, closeBtn);
       }
 
+      syncResultWatchers();
       positionPill();
     }
 
@@ -812,8 +919,10 @@
 
       const identity = elementIdentity(found.image, win);
       if (found.input !== currentTarget?.input || found.image !== currentTarget?.image || identity !== currentIdentity) {
-        stopDrag();
-        userDragPos = null;
+        if (found.input !== currentTarget?.input) {
+          stopDrag();
+          userDragPos = null;
+        }
         mode = "idle";
         lastResult = null;
         currentAnswer = "";
@@ -830,6 +939,7 @@
       const fresh = detectQuickTarget(doc, { profile });
       if (fresh.ok) currentTarget = fresh;
       if (!currentTarget?.image || !currentTarget?.input) return;
+      currentIdentity = elementIdentity(currentTarget.image, win);
 
       mode = "busy";
       errorText = "";
